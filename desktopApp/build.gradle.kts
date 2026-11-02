@@ -8,6 +8,7 @@ dependencies {
     implementation("com.fasterxml.jackson.core:jackson-databind:2.19.2")
     implementation("net.sourceforge.tess4j:tess4j:5.13.0")
     implementation("org.apache.pdfbox:pdfbox:3.0.5")
+    implementation("net.java.dev.jna:jna-platform:5.14.0")
     testImplementation(kotlin("test"))
     testImplementation(project(":server"))
     testImplementation("io.javalin:javalin:7.2.4")

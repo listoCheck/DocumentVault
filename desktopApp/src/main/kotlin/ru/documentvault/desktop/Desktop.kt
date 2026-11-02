@@ -76,6 +76,7 @@ class VaultApi(private val root: String = ROOT) {
 class VaultWindow : JFrame("DocumentVault — локальный прототип") {
     private val api = VaultApi()
     private var token: String? = null
+    private var accountIdentity: String? = null
     private var masterKey: ByteArray? = null
     private var busy = false
     private val user = JTextField(16)
@@ -114,7 +115,8 @@ class VaultWindow : JFrame("DocumentVault — локальный прототи�
             add(button("Сроки") { showExpiries() })
             add(button("Изменить срок") { editExpiry() })
         }
-        val top = JPanel().apply { layout = BoxLayout(this, BoxLayout.Y_AXIS); add(auth); add(actions); add(search) }
+        val reminders = JPanel(FlowLayout(FlowLayout.LEFT)).apply { add(button("Включить фоновые уведомления") { installReminders() }) }
+        val top = JPanel().apply { layout = BoxLayout(this, BoxLayout.Y_AXIS); add(auth); add(actions); add(search); add(reminders) }
         contentPane.add(top, BorderLayout.NORTH)
         contentPane.add(JScrollPane(list), BorderLayout.CENTER)
         contentPane.add(status, BorderLayout.SOUTH)
@@ -160,7 +162,7 @@ class VaultWindow : JFrame("DocumentVault — локальный прототи�
     private fun login() {
         if (token != null) { JOptionPane.showMessageDialog(this, "Сначала выйдите из текущего аккаунта."); return }
         val name = user.text.trim(); val pass = String(password.password)
-        runTask("Вход…", { api.login(name, pass) }) { token = it; password.text = ""; model.clear(); status.text = "Вход выполнен. Разблокируйте хранилище." }
+        runTask("Вход…", { api.login(name, pass) }) { token = it; accountIdentity = ROOT + "\u0000" + name.lowercase(java.util.Locale.ROOT); password.text = ""; model.clear(); status.text = "Вход выполнен. Разблокируйте хранилище." }
     }
     private fun unlock() {
         val current = token ?: run { JOptionPane.showMessageDialog(this, "Сначала войдите в аккаунт."); return }
@@ -170,11 +172,16 @@ class VaultWindow : JFrame("DocumentVault — локальный прототи�
     private fun lock() { masterKey?.fill(0); masterKey = null; recognized.clear(); expiryDates.clear(); documentNames.clear(); list.repaint(); status.text = "Хранилище заблокировано. Распознанный текст удалён из памяти." }
     private fun logout() {
         val current = token ?: return
-        runTask("Выход…", { api.logout(current) }) { token = null; lock(); model.clear(); status.text = "Вы вышли из аккаунта." }
+        runTask("Выход…", { api.logout(current) }) { token = null; accountIdentity = null; lock(); model.clear(); status.text = "Вы вышли из аккаунта." }
+    }
+    private fun installReminders() {
+        runTask("Настраиваем уведомления Windows…", { WindowsReminderTask.install() }) { created ->
+            status.text = if (created) "Фоновые уведомления Windows включены." else "Задание DocumentVault уже существует."
+        }
     }
     private fun refresh() {
         val current = token ?: run { JOptionPane.showMessageDialog(this, "Сначала войдите в аккаунт."); return }
-        val key = masterKey?.copyOf()
+        val key = masterKey?.copyOf(); val identity = accountIdentity
         runTask("Получение списка…", {
             try {
                 val ids = api.list(current)
@@ -184,9 +191,14 @@ class VaultWindow : JFrame("DocumentVault — локальный прототи�
                         try { id to json.readTree(plain) } finally { plain.fill(0) }
                     }
                 }.toMap()
-                ids to metadata
+                var reminderError = false
+                if (key != null && identity != null && System.getProperty("os.name").startsWith("Windows")) try {
+                    val dates = metadata.mapNotNull { (id, data) -> data.path("expiry").asText("").takeIf { it.isNotEmpty() }?.let { id to java.time.LocalDate.parse(it) } }.toMap()
+                    WindowsReminderStore().replaceAccount(identity, dates)
+                } catch (_: Exception) { reminderError = true }
+                Triple(ids, metadata, reminderError)
             } finally { key?.fill(0) }
-        }) { (ids, metadata) ->
+        }) { (ids, metadata, reminderError) ->
             recognized.clear(); expiryDates.clear(); documentNames.clear()
             metadata.forEach { (id, data) ->
                 data.path("text").asText("").takeIf { it.isNotEmpty() }?.let { recognized[id] = it }
@@ -194,7 +206,7 @@ class VaultWindow : JFrame("DocumentVault — локальный прототи�
                 data.path("expiry").asText("").takeIf { it.isNotEmpty() }?.let { expiryDates[id] = java.time.LocalDate.parse(it) }
             }
             model.clear(); ids.forEach(model::addElement)
-            status.text = "Документов: ${ids.size}. Текстов для поиска: ${recognized.size}."
+            status.text = if (reminderError) "Документы загружены, но расписание уведомлений не обновлено." else "Документов: ${ids.size}. Текстов для поиска: ${recognized.size}."
             notifyExpiries()
         }
     }
@@ -269,13 +281,15 @@ class VaultWindow : JFrame("DocumentVault — локальный прототи�
                     JOptionPane.showMessageDialog(this, "Неверная дата. Распознайте документ ещё раз для сохранения."); return@runTask
                 }
                 val saveKey = masterKey?.copyOf() ?: return@runTask
+                val identity = accountIdentity
                 SwingUtilities.invokeLater {
                     runTask("Сохранение зашифрованного текста…", {
                         try {
                             val bytes = json.writeValueAsBytes(mapOf("name" to name, "text" to text, "expiry" to (expiry?.toString() ?: "")))
                             try { api.saveMetadata(current, id, VaultCrypto.encrypt(saveKey, bytes, "metadata:$id".toByteArray())) } finally { bytes.fill(0) }
+                            if (identity != null && System.getProperty("os.name").startsWith("Windows")) runCatching { WindowsReminderStore().put(identity, id, expiry) }.isSuccess else true
                         } finally { saveKey.fill(0) }
-                    }) { if (expiry != null) expiryDates[id] = expiry else expiryDates.remove(id); status.text = "Распознанный текст и срок сохранены в зашифрованном виде." }
+                    }) { reminderSaved -> if (expiry != null) expiryDates[id] = expiry else expiryDates.remove(id); status.text = if (reminderSaved) "Распознанный текст и срок сохранены в зашифрованном виде." else "Документ сохранён, но расписание уведомлений не обновлено." }
                 }
             } else { status.text = "Текст доступен для поиска до блокировки. Для сохранения повторите распознавание." }
         }
@@ -302,6 +316,7 @@ class VaultWindow : JFrame("DocumentVault — локальный прототи�
         val date = if (input.isBlank()) null else try { java.time.LocalDate.parse(input.trim()) } catch (_: Exception) {
             key.fill(0); JOptionPane.showMessageDialog(this, "Неверный формат даты."); return
         }
+        val identity = accountIdentity
         runTask("Сохранение срока…", {
             try {
                 val existing = api.metadata(current, id)?.let { encrypted ->
@@ -310,8 +325,9 @@ class VaultWindow : JFrame("DocumentVault — локальный прототи�
                 }
                 val data = json.writeValueAsBytes(mapOf("name" to (existing?.path("name")?.asText("") ?: ""), "text" to (existing?.path("text")?.asText("") ?: ""), "expiry" to (date?.toString() ?: "")))
                 try { api.saveMetadata(current, id, VaultCrypto.encrypt(key, data, "metadata:$id".toByteArray())) } finally { data.fill(0) }
+                if (identity != null && System.getProperty("os.name").startsWith("Windows")) runCatching { WindowsReminderStore().put(identity, id, date) }.isSuccess else true
             } finally { key.fill(0) }
-        }) { if (date == null) expiryDates.remove(id) else expiryDates[id] = date; reminderDay = null; status.text = "Срок сохранён." }
+        }) { reminderSaved -> if (date == null) expiryDates.remove(id) else expiryDates[id] = date; reminderDay = null; status.text = if (reminderSaved) "Срок сохранён." else "Срок сохранён, но расписание уведомлений не обновлено." }
     }
     private fun notifyExpiries() {
         if (masterKey == null || busy) return
