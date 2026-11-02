@@ -1,0 +1,7 @@
+{$VAULT_DOMAIN} {
+    reverse_proxy server:7070
+    header {
+        Cache-Control "no-store"
+        X-Content-Type-Options "nosniff"
+    }
+}

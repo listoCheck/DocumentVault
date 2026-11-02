@@ -1,0 +1,31 @@
+services:
+  server:
+    build: .
+    restart: unless-stopped
+    volumes:
+      - vault-data:/data
+    networks:
+      - vault-internal
+
+  https:
+    image: caddy:2
+    restart: unless-stopped
+    environment:
+      VAULT_DOMAIN: ${VAULT_DOMAIN:?Set VAULT_DOMAIN to your public domain}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - vault-internal
+
+networks:
+  vault-internal:
+
+volumes:
+  vault-data:
+  caddy-data:
+  caddy-config:

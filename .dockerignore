@@ -1,0 +1,10 @@
+**/build/
+.gradle/
+.idea/
+.kotlin/
+tessdata/
+*.db
+*.db-*
+*.env
+local.properties
+**/hs_err_pid*.log
