@@ -3,6 +3,7 @@
 .idea/
 .kotlin/
 hs_err_pid*.log
+*.hprof
 *.iml
 local.properties
 *.db

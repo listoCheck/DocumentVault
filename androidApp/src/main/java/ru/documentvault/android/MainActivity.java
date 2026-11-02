@@ -8,10 +8,15 @@ import android.content.ActivityNotFoundException;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Bundle;
+import android.graphics.Color;
+import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
 import android.provider.OpenableColumns;
 import android.provider.MediaStore;
 import android.text.InputType;
 import android.view.WindowManager;
+import android.view.View;
+import android.view.Gravity;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
@@ -37,12 +42,14 @@ public final class MainActivity extends Activity {
     private static final int MAX_FILE_BYTES = 15 * 1024 * 1024;
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private EditText serverField, usernameField, passwordField, recoveryField;
-    private TextView status, documents;
+    private TextView status, heroTitle, heroSubtitle, documentCount;
+    private LinearLayout loginPanel, unlockPanel, vaultPanel, documentList;
     private VaultApi api;
     private String token;
     private byte[] masterKey;
     private byte[] pendingDocument;
     private String[] documentIds = new String[0];
+    private String[] documentNames = new String[0];
     private File pendingCapture;
     private volatile boolean busy;
 
@@ -54,31 +61,107 @@ public final class MainActivity extends Activity {
         File[] stale = cameraDir.listFiles();
         if (stale != null) for (File file : stale) if (pendingCapture == null || !file.equals(pendingCapture)) file.delete();
         getWindow().setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE);
-        LinearLayout layout = new LinearLayout(this);
-        layout.setOrientation(LinearLayout.VERTICAL); layout.setPadding(28, 32, 28, 32);
-        TextView title = new TextView(this); title.setText("DocumentVault — прототип"); title.setTextSize(22); layout.addView(title);
-        serverField = field(layout, "HTTPS-адрес сервера", false);
-        usernameField = field(layout, "Логин", false);
-        passwordField = field(layout, "Пароль входа", true);
-        recoveryField = field(layout, "Пароль восстановления", true);
-        button(layout, "Войти", this::login);
-        button(layout, "Разблокировать", this::unlock);
-        button(layout, "Обновить список", this::refresh);
-        button(layout, "Загрузить файл", this::chooseFile);
-        button(layout, "Сфотографировать", this::capturePhoto);
-        button(layout, "Сохранить документ", this::chooseDocument);
-        button(layout, "Заблокировать", this::lock);
-        status = new TextView(this); status.setText("Нужен настроенный HTTPS-сервер. Биометрия пока недоступна."); layout.addView(status);
-        documents = new TextView(this); layout.addView(documents);
-        ScrollView scroll = new ScrollView(this); scroll.addView(layout); setContentView(scroll);
+        getWindow().setStatusBarColor(Color.rgb(245, 248, 246));
+        getWindow().setNavigationBarColor(Color.rgb(245, 248, 246));
+        getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
+        LinearLayout layout = column(); layout.setPadding(dp(22), dp(24), dp(22), dp(36)); layout.setBackgroundColor(Color.rgb(245, 248, 246));
+        LinearLayout brand = new LinearLayout(this); brand.setGravity(Gravity.CENTER_VERTICAL);
+        TextView mark = label("DV", 15, Color.WHITE, true); mark.setGravity(Gravity.CENTER); mark.setBackground(round(Color.rgb(22, 79, 71), 14));
+        brand.addView(mark, new LinearLayout.LayoutParams(dp(42), dp(42)));
+        LinearLayout brandText = column(); brandText.setPadding(dp(12), 0, 0, 0);
+        brandText.addView(label("DocumentVault", 17, ink(), true));
+        brandText.addView(label("ЛИЧНОЕ ХРАНИЛИЩЕ", 10, muted(), true));
+        brand.addView(brandText); layout.addView(brand);
+        space(layout, 34);
+        heroTitle = label("Документы\nпод защитой", 30, ink(), true); heroTitle.setLineSpacing(dp(2), 1f); layout.addView(heroTitle);
+        space(layout, 8);
+        heroSubtitle = label("Войдите, чтобы открыть своё хранилище.", 15, muted(), false); layout.addView(heroSubtitle);
+        space(layout, 24);
+
+        loginPanel = card();
+        loginPanel.addView(label("Вход в аккаунт", 19, ink(), true));
+        space(loginPanel, 5); loginPanel.addView(label("Используйте данные существующего аккаунта.", 13, muted(), false));
+        space(loginPanel, 20);
+        loginPanel.addView(label("Адрес сервера", 12, ink(), true)); serverField = field(loginPanel, "https://example.com", false);
+        loginPanel.addView(label("Логин", 12, ink(), true)); usernameField = field(loginPanel, "Ваш логин", false);
+        loginPanel.addView(label("Пароль", 12, ink(), true)); passwordField = field(loginPanel, "Пароль входа", true);
+        button(loginPanel, "Войти", true, this::login);
+        space(loginPanel, 12); loginPanel.addView(label("Регистрация пока доступна в версии для Windows.", 12, muted(), false));
+        layout.addView(loginPanel);
+
+        unlockPanel = card(); unlockPanel.addView(label("Откройте хранилище", 19, ink(), true));
+        space(unlockPanel, 7); unlockPanel.addView(label("Введите пароль восстановления, чтобы получить доступ к документам.", 14, muted(), false));
+        space(unlockPanel, 18); unlockPanel.addView(label("Пароль восстановления", 12, ink(), true));
+        recoveryField = field(unlockPanel, "Ваш пароль восстановления", true);
+        button(unlockPanel, "Разблокировать", true, this::unlock);
+        space(unlockPanel, 8); button(unlockPanel, "Выйти из аккаунта", false, this::logout);
+        layout.addView(unlockPanel);
+
+        vaultPanel = column();
+        LinearLayout actions = new LinearLayout(this); actions.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout left = column(); LinearLayout right = column();
+        button(left, "+  Добавить файл", true, this::chooseFile); button(right, "Камера", false, this::capturePhoto);
+        LinearLayout.LayoutParams leftParams = new LinearLayout.LayoutParams(0, -2, 1); leftParams.setMargins(0, 0, dp(8), 0);
+        actions.addView(left, leftParams); actions.addView(right, new LinearLayout.LayoutParams(0, -2, 1)); vaultPanel.addView(actions);
+        space(vaultPanel, 24);
+        LinearLayout section = new LinearLayout(this); section.setGravity(Gravity.CENTER_VERTICAL);
+        TextView sectionTitle = label("Мои документы", 20, ink(), true); section.addView(sectionTitle, new LinearLayout.LayoutParams(0, -2, 1));
+        documentCount = label("0", 12, Color.rgb(26, 105, 91), true); documentCount.setGravity(Gravity.CENTER); documentCount.setBackground(round(Color.rgb(223, 240, 233), 20));
+        section.addView(documentCount, new LinearLayout.LayoutParams(dp(34), dp(30))); vaultPanel.addView(section);
+        space(vaultPanel, 12); documentList = column(); vaultPanel.addView(documentList);
+        space(vaultPanel, 14); button(vaultPanel, "Обновить список", false, this::refresh);
+        space(vaultPanel, 8); button(vaultPanel, "Заблокировать", false, this::lock);
+        layout.addView(vaultPanel);
+
+        space(layout, 18);
+        status = label("Укажите адрес сервера и войдите в аккаунт.", 13, muted(), false);
+        status.setPadding(dp(14), dp(12), dp(14), dp(12)); status.setBackground(round(Color.rgb(231, 239, 235), 14)); layout.addView(status);
+        space(layout, 18); TextView foot = label("Данные шифруются на устройстве", 12, muted(), false); foot.setGravity(Gravity.CENTER); layout.addView(foot);
+        ScrollView scroll = new ScrollView(this); scroll.setFillViewport(true); scroll.addView(layout); setContentView(scroll);
+        renderDocuments(); updateScreen();
     }
+    private int dp(float value) { return Math.round(value * getResources().getDisplayMetrics().density); }
+    private int ink() { return Color.rgb(26, 45, 41); }
+    private int muted() { return Color.rgb(105, 126, 118); }
+    private GradientDrawable round(int color, int radius) { GradientDrawable drawable = new GradientDrawable(); drawable.setColor(color); drawable.setCornerRadius(dp(radius)); return drawable; }
+    private LinearLayout column() { LinearLayout view = new LinearLayout(this); view.setOrientation(LinearLayout.VERTICAL); return view; }
+    private LinearLayout card() { LinearLayout view = column(); view.setPadding(dp(20), dp(22), dp(20), dp(22)); view.setBackground(round(Color.WHITE, 22)); return view; }
+    private TextView label(String text, int size, int color, boolean bold) { TextView view = new TextView(this); view.setText(text); view.setTextSize(size); view.setTextColor(color); if (bold) view.setTypeface(Typeface.DEFAULT, Typeface.BOLD); return view; }
+    private void space(LinearLayout parent, int height) { parent.addView(new View(this), new LinearLayout.LayoutParams(1, dp(height))); }
     private EditText field(LinearLayout layout, String hint, boolean secret) {
-        EditText input = new EditText(this); input.setHint(hint); input.setSingleLine(true);
+        EditText input = new EditText(this); input.setHint(hint); input.setSingleLine(true); input.setTextSize(15); input.setTextColor(ink()); input.setHintTextColor(Color.rgb(149, 165, 158));
+        input.setPadding(dp(14), 0, dp(14), 0); input.setBackground(round(Color.rgb(245, 248, 246), 12));
         if (secret) input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        layout.addView(input); return input;
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, dp(50)); params.setMargins(0, dp(7), 0, dp(16)); layout.addView(input, params); return input;
     }
-    private void button(LinearLayout layout, String text, Runnable action) {
-        Button button = new Button(this); button.setText(text); button.setOnClickListener(v -> { if (!busy) action.run(); }); layout.addView(button);
+    private void button(LinearLayout layout, String text, boolean primary, Runnable action) {
+        Button button = new Button(this); button.setText(text); button.setTextSize(14); button.setAllCaps(false); button.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        button.setTextColor(primary ? Color.WHITE : Color.rgb(25, 86, 74)); button.setBackground(round(primary ? Color.rgb(22, 97, 81) : Color.rgb(226, 239, 232), 14));
+        button.setElevation(0); button.setOnClickListener(v -> { if (!busy) action.run(); }); layout.addView(button, new LinearLayout.LayoutParams(-1, dp(52)));
+    }
+    private void updateScreen() {
+        boolean loggedIn = token != null, unlocked = masterKey != null;
+        loginPanel.setVisibility(loggedIn ? View.GONE : View.VISIBLE);
+        unlockPanel.setVisibility(loggedIn && !unlocked ? View.VISIBLE : View.GONE);
+        vaultPanel.setVisibility(unlocked ? View.VISIBLE : View.GONE);
+        heroTitle.setText(unlocked ? "Всё важное\nрядом" : loggedIn ? "Вход выполнен" : "Документы\nпод защитой");
+        heroSubtitle.setText(unlocked ? "Ваши документы в надёжном месте." : loggedIn ? "Остался один шаг до ваших документов." : "Войдите, чтобы открыть своё хранилище.");
+    }
+    private void renderDocuments() {
+        documentList.removeAllViews(); documentCount.setText(String.valueOf(documentIds.length));
+        if (documentIds.length == 0) {
+            LinearLayout empty = card(); TextView title = label("Здесь пока пусто", 16, ink(), true); title.setGravity(Gravity.CENTER); empty.addView(title);
+            space(empty, 6); TextView hint = label("Добавьте файл или сделайте снимок документа.", 13, muted(), false); hint.setGravity(Gravity.CENTER); empty.addView(hint); documentList.addView(empty); return;
+        }
+        for (int i = 0; i < documentIds.length; i++) {
+            final String id = documentIds[i]; String name = i < documentNames.length ? documentNames[i] : id;
+            LinearLayout row = new LinearLayout(this); row.setPadding(dp(14), dp(14), dp(14), dp(14)); row.setGravity(Gravity.CENTER_VERTICAL); row.setBackground(round(Color.WHITE, 16));
+            TextView icon = label("DOC", 11, Color.rgb(23, 99, 81), true); icon.setGravity(Gravity.CENTER); icon.setBackground(round(Color.rgb(226, 240, 233), 12)); row.addView(icon, new LinearLayout.LayoutParams(dp(46), dp(46)));
+            LinearLayout detail = column(); detail.setPadding(dp(12), 0, dp(8), 0); TextView title = label(name, 15, ink(), true); title.setMaxLines(1); title.setEllipsize(android.text.TextUtils.TruncateAt.END); detail.addView(title);
+            detail.addView(label("Нажмите, чтобы сохранить", 12, muted(), false)); row.addView(detail, new LinearLayout.LayoutParams(0, -2, 1)); row.addView(label("›", 24, muted(), false));
+            row.setOnClickListener(v -> { if (!busy) download(id); });
+            documentList.addView(row); space(documentList, 8);
+        }
     }
     private interface Task<T> { T run() throws Exception; }
     private interface Done<T> { void accept(T value); }
@@ -107,7 +190,7 @@ public final class MainActivity extends Activity {
         runTask("Вход…", () -> {
             VaultApi selectedApi = new VaultApi(address);
             return new LoginResult(selectedApi, selectedApi.login(username, password));
-        }, result -> { api = result.api; token = result.token; status.setText("Вход выполнен. Введите пароль восстановления и разблокируйте хранилище."); });
+        }, result -> { api = result.api; token = result.token; updateScreen(); status.setText("Вход выполнен. Разблокируйте хранилище."); });
     }
     private static final class LoginResult {
         final VaultApi api; final String token;
@@ -119,20 +202,45 @@ public final class MainActivity extends Activity {
         VaultApi selectedApi = api; String selectedToken = token;
         runTask("Разблокировка…", () -> selectedApi.unlock(selectedToken, password), key -> {
             if (masterKey != null) Arrays.fill(masterKey, (byte) 0);
-            masterKey = key; status.setText("Хранилище разблокировано. Можно загрузить файл или обновить список.");
+            masterKey = key; updateScreen(); status.setText("Хранилище разблокировано."); refresh();
+        });
+    }
+    private void logout() {
+        if (token == null) return;
+        VaultApi selectedApi = api; String selectedToken = token;
+        runTask("Выход…", () -> { selectedApi.logout(selectedToken); return true; }, ignored -> {
+            if (masterKey != null) Arrays.fill(masterKey, (byte) 0);
+            masterKey = null; token = null; api = null; documentIds = new String[0]; documentNames = new String[0];
+            renderDocuments(); updateScreen(); status.setText("Вы вышли из аккаунта.");
         });
     }
     private void refresh() {
         if (token == null) { status.setText("Сначала войдите в аккаунт."); return; }
-        VaultApi selectedApi = api; String selectedToken = token;
-        runTask("Получение списка…", () -> selectedApi.list(selectedToken), list -> {
-            StringBuilder output = new StringBuilder("Документы (идентификаторы):\n");
-            String[] ids = new String[list.length()];
-            try { for (int i = 0; i < list.length(); i++) { ids[i] = list.getJSONObject(i).getString("id"); output.append(ids[i]).append('\n'); } }
-            catch (Exception e) { status.setText("Некорректный ответ сервера"); return; }
-            documentIds = ids;
-            documents.setText(output.toString()); status.setText("Документов: " + list.length());
+        VaultApi selectedApi = api; String selectedToken = token; byte[] key = masterKey == null ? null : masterKey.clone();
+        runTask("Обновляем документы…", () -> {
+            try {
+                JSONArray list = selectedApi.list(selectedToken);
+                String[] ids = new String[list.length()], names = new String[list.length()];
+                for (int i = 0; i < list.length(); i++) {
+                    ids[i] = list.getJSONObject(i).getString("id"); names[i] = ids[i];
+                    if (key != null) {
+                        byte[] encrypted = selectedApi.metadata(selectedToken, ids[i]);
+                        if (encrypted != null) {
+                            byte[] plain = VaultCrypto.decrypt(key, encrypted, "metadata:" + ids[i]);
+                            try { String name = new JSONObject(new String(plain, StandardCharsets.UTF_8)).optString("name", ""); if (!name.trim().isEmpty()) names[i] = name; }
+                            finally { Arrays.fill(plain, (byte) 0); }
+                        }
+                    }
+                }
+                return new DocumentListing(ids, names);
+            } finally { if (key != null) Arrays.fill(key, (byte) 0); }
+        }, listing -> {
+            documentIds = listing.ids; documentNames = listing.names; renderDocuments(); status.setText("Документы обновлены.");
         });
+    }
+    private static final class DocumentListing {
+        final String[] ids, names;
+        DocumentListing(String[] ids, String[] names) { this.ids = ids; this.names = names; }
     }
     private void chooseFile() {
         if (token == null || masterKey == null) { status.setText("Войдите и разблокируйте хранилище."); return; }
@@ -211,7 +319,7 @@ public final class MainActivity extends Activity {
             } finally { Arrays.fill(key, (byte) 0); if (file != null) Arrays.fill(file, (byte) 0); if (payload != null) Arrays.fill(payload, (byte) 0); if (temporaryCapture != null) temporaryCapture.delete(); }
         }, result -> {
             status.setText(result.message);
-            if (result.text != null) confirmOcr(result);
+            if (result.text != null) confirmOcr(result); else refresh();
         });
     }
     private static final class UploadResult {
@@ -225,7 +333,7 @@ public final class MainActivity extends Activity {
         EditText expiry = new EditText(this); expiry.setHint("ГГГГ-ММ-ДД"); expiry.setSingleLine(true); content.addView(expiry);
         TextView text = new TextView(this); text.setText(result.text); ScrollView scroll = new ScrollView(this); scroll.addView(text); content.addView(scroll, new LinearLayout.LayoutParams(-1, 400));
         new AlertDialog.Builder(this).setTitle("Проверьте результат OCR").setView(content)
-            .setNegativeButton("Не сохранять", (dialog, which) -> status.setText("Текст OCR не сохранён."))
+            .setNegativeButton("Не сохранять", (dialog, which) -> { status.setText("Текст OCR не сохранён."); refresh(); })
             .setPositiveButton("Сохранить", (dialog, which) -> saveOcr(result, expiry.getText().toString().trim())).show();
     }
     private void saveOcr(UploadResult result, String expiry) {
@@ -239,7 +347,7 @@ public final class MainActivity extends Activity {
                 selectedApi.saveMetadata(selectedToken, result.id, VaultCrypto.encrypt(key, bytes, "metadata:" + result.id));
                 return "Распознанный текст и срок сохранены в зашифрованном виде.";
             } finally { Arrays.fill(key, (byte) 0); if (bytes != null) Arrays.fill(bytes, (byte) 0); }
-        }, message -> status.setText(message));
+        }, message -> { status.setText(message); refresh(); });
     }
     private void chooseDocument() {
         if (token == null || masterKey == null) { status.setText("Войдите и разблокируйте хранилище."); return; }
@@ -289,6 +397,6 @@ public final class MainActivity extends Activity {
             return out.toByteArray();
         }
     }
-    private void lock() { if (masterKey != null) Arrays.fill(masterKey, (byte) 0); if (pendingDocument != null) Arrays.fill(pendingDocument, (byte) 0); masterKey = null; pendingDocument = null; documentIds = new String[0]; documents.setText(""); status.setText("Хранилище заблокировано."); }
+    private void lock() { if (masterKey != null) Arrays.fill(masterKey, (byte) 0); if (pendingDocument != null) Arrays.fill(pendingDocument, (byte) 0); masterKey = null; pendingDocument = null; documentIds = new String[0]; documentNames = new String[0]; renderDocuments(); updateScreen(); status.setText("Хранилище заблокировано."); }
     @Override protected void onDestroy() { if (masterKey != null) Arrays.fill(masterKey, (byte) 0); if (pendingDocument != null) Arrays.fill(pendingDocument, (byte) 0); masterKey = null; pendingDocument = null; token = null; executor.shutdownNow(); super.onDestroy(); }
 }

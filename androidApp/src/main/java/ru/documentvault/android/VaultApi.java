@@ -11,6 +11,10 @@ import java.util.Arrays;
 import java.util.Base64;
 
 public final class VaultApi {
+    public static final class HttpFailure extends Exception {
+        public final int status;
+        HttpFailure(int status) { super("Ошибка сервера: HTTP " + status); this.status = status; }
+    }
     private final String root;
     public VaultApi(String root) {
         URI uri = URI.create(root);
@@ -29,7 +33,7 @@ public final class VaultApi {
         try {
             if (body != null) { connection.setDoOutput(true); connection.setFixedLengthStreamingMode(body.length); try (var stream = connection.getOutputStream()) { stream.write(body); } }
             int status = connection.getResponseCode();
-            if (status < 200 || status >= 300) throw new IllegalStateException("Ошибка сервера: HTTP " + status);
+            if (status < 200 || status >= 300) throw new HttpFailure(status);
             try (InputStream in = connection.getInputStream(); ByteArrayOutputStream out = new ByteArrayOutputStream()) {
                 byte[] buffer = new byte[8192]; int n; int total = 0;
                 while ((n = in.read(buffer)) != -1) { total += n; if (total > 16 * 1024 * 1024) throw new IllegalStateException("Ответ слишком большой"); out.write(buffer, 0, n); }
@@ -52,5 +56,10 @@ public final class VaultApi {
     public JSONArray list(String token) throws Exception { return new JSONArray(new String(request("GET", "/v1/documents", null, token, null, false), StandardCharsets.UTF_8)); }
     public void upload(String token, String id, byte[] ciphertext) throws Exception { request("POST", "/v1/documents", ciphertext, token, id, false); }
     public byte[] download(String token, String id) throws Exception { return request("GET", "/v1/documents/" + id, null, token, null, false); }
+    public byte[] metadata(String token, String id) throws Exception {
+        try { return request("GET", "/v1/documents/" + id + "/metadata", null, token, null, false); }
+        catch (HttpFailure e) { if (e.status == 404) return null; throw e; }
+    }
     public void saveMetadata(String token, String id, byte[] ciphertext) throws Exception { request("PUT", "/v1/documents/" + id + "/metadata", ciphertext, token, null, false); }
+    public void logout(String token) throws Exception { request("DELETE", "/v1/sessions/current", null, token, null, false); }
 }
