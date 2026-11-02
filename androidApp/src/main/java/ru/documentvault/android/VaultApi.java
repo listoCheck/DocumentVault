@@ -45,6 +45,20 @@ public final class VaultApi {
         byte[] body = new JSONObject().put("username", username).put("password", password).toString().getBytes(StandardCharsets.UTF_8);
         return new JSONObject(new String(request("POST", "/v1/sessions", body, null, null, true), StandardCharsets.UTF_8)).getString("token");
     }
+    public void register(String username, String password, char[] recoveryPassword) throws Exception {
+        byte[] masterKey = new byte[32], salt = new byte[16], recoveryKey = null;
+        new java.security.SecureRandom().nextBytes(masterKey); new java.security.SecureRandom().nextBytes(salt);
+        try {
+            recoveryKey = VaultCrypto.derive(recoveryPassword, salt);
+            JSONObject registration = new JSONObject().put("username", username).put("password", password)
+                .put("recoverySalt", Base64.getEncoder().encodeToString(salt))
+                .put("wrappedKey", Base64.getEncoder().encodeToString(VaultCrypto.encrypt(recoveryKey, masterKey, "master-key")));
+            request("POST", "/v1/accounts", registration.toString().getBytes(StandardCharsets.UTF_8), null, null, true);
+        } finally {
+            Arrays.fill(masterKey, (byte) 0); Arrays.fill(recoveryPassword, '\0');
+            if (recoveryKey != null) Arrays.fill(recoveryKey, (byte) 0);
+        }
+    }
     public byte[] unlock(String token, char[] password) throws Exception {
         byte[] key = null;
         try {

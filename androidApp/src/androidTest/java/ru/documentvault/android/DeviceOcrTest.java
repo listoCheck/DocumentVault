@@ -33,4 +33,14 @@ public final class DeviceOcrTest {
         assertTrue("English text missing from OCR result: " + text, text.contains("DOCUMENT"));
         assertTrue("Russian text missing from OCR result: " + text, text.contains("ДОКУМЕНТ"));
     }
+    @Test public void testRecognizesSyntheticPdf() throws Exception {
+        android.graphics.pdf.PdfDocument pdf = new android.graphics.pdf.PdfDocument();
+        android.graphics.pdf.PdfDocument.Page page = pdf.startPage(new android.graphics.pdf.PdfDocument.PageInfo.Builder(800, 300, 1).create());
+        Canvas canvas = page.getCanvas(); canvas.drawColor(Color.WHITE);
+        Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG); paint.setColor(Color.BLACK); paint.setTypeface(Typeface.create("sans-serif", Typeface.BOLD)); paint.setTextSize(65);
+        canvas.drawText("DOCUMENT 2030", 30, 130, paint); pdf.finishPage(page);
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream(); pdf.writeTo(buffer); pdf.close();
+        String text = LocalOcr.recognizePdf(InstrumentationRegistry.getInstrumentation().getTargetContext(), buffer.toByteArray()).toUpperCase(Locale.ROOT);
+        assertTrue("PDF text missing from OCR result: " + text, text.contains("DOCUMENT"));
+    }
 }

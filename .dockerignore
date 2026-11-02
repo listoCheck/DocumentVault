@@ -1,5 +1,6 @@
 **/build/
 .gradle/
+.git/
 .idea/
 .kotlin/
 tessdata/
@@ -8,3 +9,4 @@ tessdata/
 *.env
 local.properties
 **/hs_err_pid*.log
+*.hprof

@@ -34,32 +34,50 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.io.File;
 import androidx.core.content.FileProvider;
+import androidx.core.content.ContextCompat;
+import androidx.fragment.app.FragmentActivity;
+import androidx.biometric.BiometricManager;
+import androidx.biometric.BiometricPrompt;
+import androidx.annotation.NonNull;
+import javax.crypto.Cipher;
 
-public final class MainActivity extends Activity {
+public final class MainActivity extends FragmentActivity {
     private static final int PICK_DOCUMENT = 100;
     private static final int SAVE_DOCUMENT = 101;
     private static final int CAPTURE_DOCUMENT = 102;
+    private static final int NOTIFICATION_PERMISSION = 103;
     private static final int MAX_FILE_BYTES = 15 * 1024 * 1024;
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private EditText serverField, usernameField, passwordField, recoveryField;
+    private EditText registerServer, registerUsername, registerPassword, registerRecovery, registerConfirm;
+    private EditText searchField;
     private TextView status, heroTitle, heroSubtitle, documentCount;
-    private LinearLayout loginPanel, unlockPanel, vaultPanel, documentList;
+    private LinearLayout loginPanel, registerPanel, unlockPanel, vaultPanel, documentList;
     private VaultApi api;
     private String token;
     private byte[] masterKey;
     private byte[] pendingDocument;
     private String[] documentIds = new String[0];
     private String[] documentNames = new String[0];
+    private final java.util.Map<String, String> documentExpiry = new java.util.HashMap<>();
+    private final java.util.Map<String, String> documentText = new java.util.HashMap<>();
     private File pendingCapture;
+    private BiometricKeyStore biometricStore;
+    private String accountIdentity;
+    private Button biometricUnlock;
     private volatile boolean busy;
+    private boolean creatingAccount;
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
+        biometricStore = new BiometricKeyStore(this);
         String pendingName = state == null ? null : state.getString("cameraFile");
         File cameraDir = new File(getCacheDir(), "camera");
         if (pendingName != null && pendingName.matches("capture-[a-zA-Z0-9-]+\\.jpg")) pendingCapture = new File(cameraDir, pendingName);
         File[] stale = cameraDir.listFiles();
         if (stale != null) for (File file : stale) if (pendingCapture == null || !file.equals(pendingCapture)) file.delete();
+        File[] stalePdf = new File(getCacheDir(), "ocr-pdf").listFiles();
+        if (stalePdf != null) for (File file : stalePdf) if (file.isFile() && file.getName().startsWith("document-")) file.delete();
         getWindow().setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE);
         getWindow().setStatusBarColor(Color.rgb(245, 248, 246));
         getWindow().setNavigationBarColor(Color.rgb(245, 248, 246));
@@ -86,14 +104,27 @@ public final class MainActivity extends Activity {
         loginPanel.addView(label("Логин", 12, ink(), true)); usernameField = field(loginPanel, "Ваш логин", false);
         loginPanel.addView(label("Пароль", 12, ink(), true)); passwordField = field(loginPanel, "Пароль входа", true);
         button(loginPanel, "Войти", true, this::login);
-        space(loginPanel, 12); loginPanel.addView(label("Регистрация пока доступна в версии для Windows.", 12, muted(), false));
+        space(loginPanel, 8); button(loginPanel, "Создать аккаунт", false, this::showRegistration);
         layout.addView(loginPanel);
+
+        registerPanel = card(); registerPanel.addView(label("Новый аккаунт", 19, ink(), true));
+        space(registerPanel, 5); registerPanel.addView(label("Пароль восстановления защищает ключ к документам. Сохраните его отдельно.", 13, muted(), false));
+        space(registerPanel, 18);
+        registerPanel.addView(label("Адрес сервера", 12, ink(), true)); registerServer = field(registerPanel, "https://example.com", false);
+        registerPanel.addView(label("Логин", 12, ink(), true)); registerUsername = field(registerPanel, "От 3 до 40 латинских символов", false);
+        registerPanel.addView(label("Пароль входа", 12, ink(), true)); registerPassword = field(registerPanel, "Не менее 12 символов", true);
+        registerPanel.addView(label("Пароль восстановления", 12, ink(), true)); registerRecovery = field(registerPanel, "Отдельный пароль", true);
+        registerPanel.addView(label("Повторите пароль восстановления", 12, ink(), true)); registerConfirm = field(registerPanel, "Повторите пароль", true);
+        button(registerPanel, "Зарегистрироваться", true, this::register);
+        space(registerPanel, 8); button(registerPanel, "Уже есть аккаунт", false, this::showLogin);
+        layout.addView(registerPanel);
 
         unlockPanel = card(); unlockPanel.addView(label("Откройте хранилище", 19, ink(), true));
         space(unlockPanel, 7); unlockPanel.addView(label("Введите пароль восстановления, чтобы получить доступ к документам.", 14, muted(), false));
         space(unlockPanel, 18); unlockPanel.addView(label("Пароль восстановления", 12, ink(), true));
         recoveryField = field(unlockPanel, "Ваш пароль восстановления", true);
         button(unlockPanel, "Разблокировать", true, this::unlock);
+        space(unlockPanel, 8); biometricUnlock = button(unlockPanel, "Войти по биометрии", false, this::unlockWithBiometrics);
         space(unlockPanel, 8); button(unlockPanel, "Выйти из аккаунта", false, this::logout);
         layout.addView(unlockPanel);
 
@@ -103,13 +134,20 @@ public final class MainActivity extends Activity {
         button(left, "+  Добавить файл", true, this::chooseFile); button(right, "Камера", false, this::capturePhoto);
         LinearLayout.LayoutParams leftParams = new LinearLayout.LayoutParams(0, -2, 1); leftParams.setMargins(0, 0, dp(8), 0);
         actions.addView(left, leftParams); actions.addView(right, new LinearLayout.LayoutParams(0, -2, 1)); vaultPanel.addView(actions);
-        space(vaultPanel, 24);
+        space(vaultPanel, 20); searchField = field(vaultPanel, "Поиск по документам", false);
+        searchField.addTextChangedListener(new android.text.TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence text, int start, int count, int after) { }
+            @Override public void onTextChanged(CharSequence text, int start, int before, int count) { renderDocuments(); }
+            @Override public void afterTextChanged(android.text.Editable text) { }
+        });
+        space(vaultPanel, 2);
         LinearLayout section = new LinearLayout(this); section.setGravity(Gravity.CENTER_VERTICAL);
         TextView sectionTitle = label("Мои документы", 20, ink(), true); section.addView(sectionTitle, new LinearLayout.LayoutParams(0, -2, 1));
         documentCount = label("0", 12, Color.rgb(26, 105, 91), true); documentCount.setGravity(Gravity.CENTER); documentCount.setBackground(round(Color.rgb(223, 240, 233), 20));
         section.addView(documentCount, new LinearLayout.LayoutParams(dp(34), dp(30))); vaultPanel.addView(section);
         space(vaultPanel, 12); documentList = column(); vaultPanel.addView(documentList);
         space(vaultPanel, 14); button(vaultPanel, "Обновить список", false, this::refresh);
+        space(vaultPanel, 8); button(vaultPanel, "Настроить биометрию", false, this::enableBiometrics);
         space(vaultPanel, 8); button(vaultPanel, "Заблокировать", false, this::lock);
         layout.addView(vaultPanel);
 
@@ -134,32 +172,77 @@ public final class MainActivity extends Activity {
         if (secret) input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, dp(50)); params.setMargins(0, dp(7), 0, dp(16)); layout.addView(input, params); return input;
     }
-    private void button(LinearLayout layout, String text, boolean primary, Runnable action) {
+    private Button button(LinearLayout layout, String text, boolean primary, Runnable action) {
         Button button = new Button(this); button.setText(text); button.setTextSize(14); button.setAllCaps(false); button.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         button.setTextColor(primary ? Color.WHITE : Color.rgb(25, 86, 74)); button.setBackground(round(primary ? Color.rgb(22, 97, 81) : Color.rgb(226, 239, 232), 14));
-        button.setElevation(0); button.setOnClickListener(v -> { if (!busy) action.run(); }); layout.addView(button, new LinearLayout.LayoutParams(-1, dp(52)));
+        button.setElevation(0); button.setOnClickListener(v -> { if (!busy) action.run(); }); layout.addView(button, new LinearLayout.LayoutParams(-1, dp(52))); return button;
     }
     private void updateScreen() {
         boolean loggedIn = token != null, unlocked = masterKey != null;
-        loginPanel.setVisibility(loggedIn ? View.GONE : View.VISIBLE);
+        loginPanel.setVisibility(!loggedIn && !creatingAccount ? View.VISIBLE : View.GONE);
+        registerPanel.setVisibility(!loggedIn && creatingAccount ? View.VISIBLE : View.GONE);
         unlockPanel.setVisibility(loggedIn && !unlocked ? View.VISIBLE : View.GONE);
         vaultPanel.setVisibility(unlocked ? View.VISIBLE : View.GONE);
-        heroTitle.setText(unlocked ? "Всё важное\nрядом" : loggedIn ? "Вход выполнен" : "Документы\nпод защитой");
-        heroSubtitle.setText(unlocked ? "Ваши документы в надёжном месте." : loggedIn ? "Остался один шаг до ваших документов." : "Войдите, чтобы открыть своё хранилище.");
+        biometricUnlock.setVisibility(loggedIn && accountIdentity != null && biometricStore.hasKey(accountIdentity) ? View.VISIBLE : View.GONE);
+        heroTitle.setText(unlocked ? "Всё важное\nрядом" : loggedIn ? "Вход выполнен" : creatingAccount ? "Создайте\nхранилище" : "Документы\nпод защитой");
+        heroSubtitle.setText(unlocked ? "Ваши документы в одном месте." : loggedIn ? "Остался один шаг до ваших документов." : creatingAccount ? "Доступ к документам только у вас." : "Войдите, чтобы открыть своё хранилище.");
+    }
+    private void showRegistration() {
+        registerServer.setText(serverField.getText()); registerUsername.setText(usernameField.getText()); creatingAccount = true; updateScreen();
+        status.setText("Создайте два разных пароля и сохраните пароль восстановления.");
+    }
+    private void showLogin() {
+        serverField.setText(registerServer.getText()); usernameField.setText(registerUsername.getText());
+        registerPassword.setText(""); registerRecovery.setText(""); registerConfirm.setText(""); creatingAccount = false; updateScreen();
+        status.setText("Укажите адрес сервера и войдите в аккаунт.");
+    }
+    private void register() {
+        String address = registerServer.getText().toString().trim();
+        String name = registerUsername.getText().toString().trim();
+        String password = registerPassword.getText().toString();
+        char[] recovery = registerRecovery.getText().toString().toCharArray();
+        char[] confirmation = registerConfirm.getText().toString().toCharArray();
+        try {
+            if (!name.matches("[a-zA-Z0-9_.-]{3,40}")) { status.setText("Логин: 3–40 латинских букв, цифр или символов _ . -"); Arrays.fill(recovery, '\0'); return; }
+            if (password.length() < 12 || password.getBytes(StandardCharsets.UTF_8).length > 72) { status.setText("Пароль входа: от 12 символов до 72 байт UTF-8."); Arrays.fill(recovery, '\0'); return; }
+            if (recovery.length < 12 || !Arrays.equals(recovery, confirmation) || Arrays.equals(recovery, password.toCharArray())) {
+                status.setText("Пароль восстановления должен содержать не менее 12 символов, отличаться от пароля входа и совпадать с повтором."); Arrays.fill(recovery, '\0'); return;
+            }
+        } finally { Arrays.fill(confirmation, '\0'); }
+        registerPassword.setText(""); registerRecovery.setText(""); registerConfirm.setText("");
+        runTask("Создаём аккаунт…", () -> {
+            try { new VaultApi(address).register(name, password, recovery); return true; }
+            finally { Arrays.fill(recovery, '\0'); }
+        }, success -> {
+            serverField.setText(address); usernameField.setText(name); creatingAccount = false; updateScreen();
+            status.setText("Аккаунт создан. Войдите с паролем входа.");
+        });
     }
     private void renderDocuments() {
-        documentList.removeAllViews(); documentCount.setText(String.valueOf(documentIds.length));
+        documentList.removeAllViews();
+        String query = searchField.getText().toString().trim();
+        int matches = 0;
+        for (int i = 0; i < documentIds.length; i++) {
+            String name = i < documentNames.length ? documentNames[i] : documentIds[i];
+            if (query.isEmpty() || OcrSearch.matches(name + " " + documentText.getOrDefault(documentIds[i], ""), query)) matches++;
+        }
+        documentCount.setText(String.valueOf(matches));
+        if (matches == 0 && !query.isEmpty()) {
+            LinearLayout empty = card(); TextView hint = label("Ничего не найдено. Попробуйте другой запрос.", 14, muted(), false); hint.setGravity(Gravity.CENTER); empty.addView(hint); documentList.addView(empty); return;
+        }
         if (documentIds.length == 0) {
             LinearLayout empty = card(); TextView title = label("Здесь пока пусто", 16, ink(), true); title.setGravity(Gravity.CENTER); empty.addView(title);
             space(empty, 6); TextView hint = label("Добавьте файл или сделайте снимок документа.", 13, muted(), false); hint.setGravity(Gravity.CENTER); empty.addView(hint); documentList.addView(empty); return;
         }
         for (int i = 0; i < documentIds.length; i++) {
             final String id = documentIds[i]; String name = i < documentNames.length ? documentNames[i] : id;
+            if (!query.isEmpty() && !OcrSearch.matches(name + " " + documentText.getOrDefault(id, ""), query)) continue;
             LinearLayout row = new LinearLayout(this); row.setPadding(dp(14), dp(14), dp(14), dp(14)); row.setGravity(Gravity.CENTER_VERTICAL); row.setBackground(round(Color.WHITE, 16));
             TextView icon = label("DOC", 11, Color.rgb(23, 99, 81), true); icon.setGravity(Gravity.CENTER); icon.setBackground(round(Color.rgb(226, 240, 233), 12)); row.addView(icon, new LinearLayout.LayoutParams(dp(46), dp(46)));
             LinearLayout detail = column(); detail.setPadding(dp(12), 0, dp(8), 0); TextView title = label(name, 15, ink(), true); title.setMaxLines(1); title.setEllipsize(android.text.TextUtils.TruncateAt.END); detail.addView(title);
-            detail.addView(label("Нажмите, чтобы сохранить", 12, muted(), false)); row.addView(detail, new LinearLayout.LayoutParams(0, -2, 1)); row.addView(label("›", 24, muted(), false));
-            row.setOnClickListener(v -> { if (!busy) download(id); });
+            String expiry = documentExpiry.get(id);
+            detail.addView(label(expiry == null ? "Срок не указан" : "Действует до " + expiry, 12, muted(), false)); row.addView(detail, new LinearLayout.LayoutParams(0, -2, 1)); row.addView(label("›", 24, muted(), false));
+            row.setOnClickListener(v -> { if (!busy) new AlertDialog.Builder(this).setTitle(name).setItems(new String[]{"Сохранить файл", "Изменить срок"}, (dialog, which) -> { if (which == 0) download(id); else editExpiry(id); }).setNegativeButton("Отмена", null).show(); });
             documentList.addView(row); space(documentList, 8);
         }
     }
@@ -189,12 +272,12 @@ public final class MainActivity extends Activity {
         String password = passwordField.getText().toString(); passwordField.setText("");
         runTask("Вход…", () -> {
             VaultApi selectedApi = new VaultApi(address);
-            return new LoginResult(selectedApi, selectedApi.login(username, password));
-        }, result -> { api = result.api; token = result.token; updateScreen(); status.setText("Вход выполнен. Разблокируйте хранилище."); });
+            return new LoginResult(selectedApi, selectedApi.login(username, password), address + "\u0000" + username.toLowerCase(java.util.Locale.ROOT));
+        }, result -> { api = result.api; token = result.token; accountIdentity = result.identity; updateScreen(); status.setText("Вход выполнен. Разблокируйте хранилище."); });
     }
     private static final class LoginResult {
-        final VaultApi api; final String token;
-        LoginResult(VaultApi api, String token) { this.api = api; this.token = token; }
+        final VaultApi api; final String token, identity;
+        LoginResult(VaultApi api, String token, String identity) { this.api = api; this.token = token; this.identity = identity; }
     }
     private void unlock() {
         if (token == null) { status.setText("Сначала войдите в аккаунт."); return; }
@@ -210,37 +293,139 @@ public final class MainActivity extends Activity {
         VaultApi selectedApi = api; String selectedToken = token;
         runTask("Выход…", () -> { selectedApi.logout(selectedToken); return true; }, ignored -> {
             if (masterKey != null) Arrays.fill(masterKey, (byte) 0);
-            masterKey = null; token = null; api = null; documentIds = new String[0]; documentNames = new String[0];
+            masterKey = null; token = null; api = null; accountIdentity = null; documentIds = new String[0]; documentNames = new String[0]; documentExpiry.clear(); documentText.clear(); searchField.setText("");
             renderDocuments(); updateScreen(); status.setText("Вы вышли из аккаунта.");
         });
     }
     private void refresh() {
         if (token == null) { status.setText("Сначала войдите в аккаунт."); return; }
-        VaultApi selectedApi = api; String selectedToken = token; byte[] key = masterKey == null ? null : masterKey.clone();
+        VaultApi selectedApi = api; String selectedToken = token; byte[] key = masterKey == null ? null : masterKey.clone(); String identity = accountIdentity;
         runTask("Обновляем документы…", () -> {
             try {
                 JSONArray list = selectedApi.list(selectedToken);
                 String[] ids = new String[list.length()], names = new String[list.length()];
+                java.util.Map<String, String> dates = new java.util.HashMap<>();
+                java.util.Map<String, String> texts = new java.util.HashMap<>();
                 for (int i = 0; i < list.length(); i++) {
                     ids[i] = list.getJSONObject(i).getString("id"); names[i] = ids[i];
                     if (key != null) {
                         byte[] encrypted = selectedApi.metadata(selectedToken, ids[i]);
                         if (encrypted != null) {
                             byte[] plain = VaultCrypto.decrypt(key, encrypted, "metadata:" + ids[i]);
-                            try { String name = new JSONObject(new String(plain, StandardCharsets.UTF_8)).optString("name", ""); if (!name.trim().isEmpty()) names[i] = name; }
+                            try { JSONObject data = new JSONObject(new String(plain, StandardCharsets.UTF_8));
+                                String name = data.optString("name", ""); if (!name.trim().isEmpty()) names[i] = name;
+                                String text = data.optString("text", ""); if (!text.isEmpty()) texts.put(ids[i], text);
+                                String date = data.optString("expiry", ""); if (!date.isEmpty()) { java.time.LocalDate.parse(date); dates.put(ids[i], date); }
+                            }
                             finally { Arrays.fill(plain, (byte) 0); }
                         }
                     }
                 }
-                return new DocumentListing(ids, names);
+                boolean reminderError = false;
+                if (key != null && identity != null) try { new ReminderStore(getApplicationContext()).replaceAccount(identity, dates); } catch (Exception e) { reminderError = true; }
+                return new DocumentListing(ids, names, dates, texts, reminderError);
             } finally { if (key != null) Arrays.fill(key, (byte) 0); }
         }, listing -> {
-            documentIds = listing.ids; documentNames = listing.names; renderDocuments(); status.setText("Документы обновлены.");
+            documentIds = listing.ids; documentNames = listing.names; documentExpiry.clear(); documentExpiry.putAll(listing.dates); documentText.clear(); documentText.putAll(listing.texts); renderDocuments();
+            status.setText(listing.reminderError ? "Документы загружены, но напоминания не обновлены." : "Документы обновлены.");
+            if (!listing.reminderError && !listing.dates.isEmpty()) enableReminders();
         });
     }
     private static final class DocumentListing {
-        final String[] ids, names;
-        DocumentListing(String[] ids, String[] names) { this.ids = ids; this.names = names; }
+        final String[] ids, names; final java.util.Map<String, String> dates, texts; final boolean reminderError;
+        DocumentListing(String[] ids, String[] names, java.util.Map<String, String> dates, java.util.Map<String, String> texts, boolean reminderError) { this.ids = ids; this.names = names; this.dates = dates; this.texts = texts; this.reminderError = reminderError; }
+    }
+    private void editExpiry(String id) {
+        if (masterKey == null || token == null) { status.setText("Сначала разблокируйте хранилище."); return; }
+        EditText input = new EditText(this); input.setSingleLine(true); input.setHint("ГГГГ-ММ-ДД"); input.setText(documentExpiry.getOrDefault(id, ""));
+        new AlertDialog.Builder(this).setTitle("Срок действия").setMessage("Введите дату в формате ГГГГ-ММ-ДД или очистите поле.")
+            .setView(input).setNegativeButton("Отмена", null).setPositiveButton("Сохранить", (dialog, which) -> {
+                String expiry = input.getText().toString().trim();
+                if (!expiry.isEmpty()) try { java.time.LocalDate.parse(expiry); } catch (java.time.DateTimeException e) { status.setText("Неверная дата. Срок не изменён."); return; }
+                if (masterKey == null || token == null) { status.setText("Хранилище заблокировано."); return; }
+                byte[] key = masterKey.clone(); VaultApi selectedApi = api; String selectedToken = token, identity = accountIdentity;
+                runTask("Сохраняем срок…", () -> {
+                    byte[] plain = null, updated = null;
+                    try {
+                        byte[] encrypted = selectedApi.metadata(selectedToken, id);
+                        JSONObject data;
+                        if (encrypted == null) data = new JSONObject().put("name", "").put("text", "");
+                        else { plain = VaultCrypto.decrypt(key, encrypted, "metadata:" + id); data = new JSONObject(new String(plain, StandardCharsets.UTF_8)); }
+                        data.put("expiry", expiry); updated = data.toString().getBytes(StandardCharsets.UTF_8);
+                        selectedApi.saveMetadata(selectedToken, id, VaultCrypto.encrypt(key, updated, "metadata:" + id));
+                        if (identity != null) try { new ReminderStore(getApplicationContext()).put(identity, id, expiry); }
+                        catch (Exception e) { return "Срок сохранён, но напоминание не настроено."; }
+                        return "Срок сохранён.";
+                    } finally { Arrays.fill(key, (byte) 0); if (plain != null) Arrays.fill(plain, (byte) 0); if (updated != null) Arrays.fill(updated, (byte) 0); }
+                }, message -> { status.setText(message); if (!expiry.isEmpty() && !message.contains("не настроено")) enableReminders(); refresh(); });
+            }).show();
+    }
+    private void enableReminders() {
+        ReminderScheduler.schedule(getApplicationContext());
+        if (android.os.Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(this, android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED)
+            requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, NOTIFICATION_PERMISSION);
+    }
+    @Override public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] results) {
+        super.onRequestPermissionsResult(requestCode, permissions, results);
+        if (requestCode == NOTIFICATION_PERMISSION && results.length > 0 && results[0] == android.content.pm.PackageManager.PERMISSION_GRANTED)
+            ReminderScheduler.schedule(getApplicationContext());
+    }
+    private boolean biometricAvailable() {
+        if (BiometricManager.from(this).canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG) == BiometricManager.BIOMETRIC_SUCCESS) return true;
+        status.setText("Надёжная биометрия недоступна или не настроена. Используйте пароль восстановления."); return false;
+    }
+    private BiometricPrompt.PromptInfo biometricPromptInfo(String title) {
+        return new BiometricPrompt.PromptInfo.Builder().setTitle(title).setSubtitle("Подтвердите личность на этом устройстве")
+            .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG).setNegativeButtonText("Отмена").build();
+    }
+    private void enableBiometrics() {
+        if (masterKey == null || accountIdentity == null || !biometricAvailable()) return;
+        final String alias;
+        final Cipher cipher;
+        try { alias = biometricStore.createAlias(); cipher = biometricStore.encryptionCipher(alias); }
+        catch (Exception e) { status.setText("Не удалось подготовить защищённый ключ устройства."); return; }
+        byte[] copy = masterKey.clone(); String identity = accountIdentity; busy = true;
+        BiometricPrompt prompt = new BiometricPrompt(this, ContextCompat.getMainExecutor(this), new BiometricPrompt.AuthenticationCallback() {
+            @Override public void onAuthenticationSucceeded(@NonNull BiometricPrompt.AuthenticationResult result) {
+                try {
+                    Cipher authorized = result.getCryptoObject() == null ? null : result.getCryptoObject().getCipher();
+                    if (authorized == null) throw new IllegalStateException("Нет подтверждённого шифра");
+                    biometricStore.store(identity, alias, authorized.getIV(), authorized.doFinal(copy));
+                    status.setText("Биометрия настроена для этого устройства."); updateScreen();
+                } catch (Exception e) { try { biometricStore.removeAlias(alias); } catch (Exception ignored) { } status.setText("Не удалось сохранить биометрический ключ."); }
+                finally { Arrays.fill(copy, (byte) 0); busy = false; }
+            }
+            @Override public void onAuthenticationError(int code, @NonNull CharSequence message) {
+                Arrays.fill(copy, (byte) 0); try { biometricStore.removeAlias(alias); } catch (Exception ignored) { }
+                busy = false; status.setText("Биометрия не настроена: " + message);
+            }
+        });
+        try { prompt.authenticate(biometricPromptInfo("Настроить биометрию"), new BiometricPrompt.CryptoObject(cipher)); }
+        catch (RuntimeException e) { Arrays.fill(copy, (byte) 0); try { biometricStore.removeAlias(alias); } catch (Exception ignored) { } busy = false; status.setText("Не удалось открыть биометрическое подтверждение."); }
+    }
+    private void unlockWithBiometrics() {
+        if (accountIdentity == null || !biometricAvailable()) return;
+        String identity = accountIdentity;
+        final Cipher cipher;
+        final byte[] encrypted;
+        try { cipher = biometricStore.decryptionCipher(identity); encrypted = biometricStore.encryptedKey(identity); }
+        catch (Exception e) { status.setText("Ключ устройства недоступен. Разблокируйте пароль восстановления и настройте биометрию заново."); return; }
+        busy = true;
+        BiometricPrompt prompt = new BiometricPrompt(this, ContextCompat.getMainExecutor(this), new BiometricPrompt.AuthenticationCallback() {
+            @Override public void onAuthenticationSucceeded(@NonNull BiometricPrompt.AuthenticationResult result) {
+                try {
+                    Cipher authorized = result.getCryptoObject() == null ? null : result.getCryptoObject().getCipher();
+                    if (authorized == null) throw new IllegalStateException("Нет подтверждённого шифра");
+                    byte[] recovered = authorized.doFinal(encrypted);
+                    if (recovered.length != 32) { Arrays.fill(recovered, (byte) 0); throw new IllegalStateException("Некорректный ключ"); }
+                    if (masterKey != null) Arrays.fill(masterKey, (byte) 0);
+                    masterKey = recovered; busy = false; updateScreen(); status.setText("Хранилище разблокировано."); refresh();
+                } catch (Exception e) { busy = false; status.setText("Не удалось разблокировать. Используйте пароль восстановления."); }
+            }
+            @Override public void onAuthenticationError(int code, @NonNull CharSequence message) { busy = false; status.setText("Биометрическое подтверждение: " + message); }
+        });
+        try { prompt.authenticate(biometricPromptInfo("Открыть хранилище"), new BiometricPrompt.CryptoObject(cipher)); }
+        catch (RuntimeException e) { busy = false; status.setText("Не удалось открыть биометрическое подтверждение."); }
     }
     private void chooseFile() {
         if (token == null || masterKey == null) { status.setText("Войдите и разблокируйте хранилище."); return; }
@@ -312,9 +497,8 @@ public final class MainActivity extends Activity {
                 catch (Exception ignored) { return new UploadResult(id, name, null, "Документ загружен. Сохранить название не удалось."); }
                 finally { Arrays.fill(metadata, (byte) 0); }
                 String mime = getContentResolver().getType(uri);
-                if ((mime != null && mime.equals("application/pdf")) || name.toLowerCase(java.util.Locale.ROOT).endsWith(".pdf"))
-                    return new UploadResult(id, name, null, "PDF загружен. OCR PDF на Android пока не реализован.");
-                try { return new UploadResult(id, name, LocalOcr.recognize(getApplicationContext(), file), "Документ загружен и распознан."); }
+                boolean isPdf = (mime != null && mime.equals("application/pdf")) || name.toLowerCase(java.util.Locale.ROOT).endsWith(".pdf");
+                try { return new UploadResult(id, name, isPdf ? LocalOcr.recognizePdf(getApplicationContext(), file) : LocalOcr.recognize(getApplicationContext(), file), "Документ загружен и распознан."); }
                 catch (Exception | LinkageError error) { return new UploadResult(id, name, null, "Документ загружен, но OCR не сработал: " + error.getClass().getSimpleName()); }
             } finally { Arrays.fill(key, (byte) 0); if (file != null) Arrays.fill(file, (byte) 0); if (payload != null) Arrays.fill(payload, (byte) 0); if (temporaryCapture != null) temporaryCapture.delete(); }
         }, result -> {
@@ -339,15 +523,17 @@ public final class MainActivity extends Activity {
     private void saveOcr(UploadResult result, String expiry) {
         if (masterKey == null || token == null) { status.setText("Хранилище заблокировано."); return; }
         if (!expiry.isEmpty()) try { java.time.LocalDate.parse(expiry); } catch (java.time.DateTimeException e) { status.setText("Неверная дата. Текст OCR не сохранён."); return; }
-        byte[] key = masterKey.clone(); VaultApi selectedApi = api; String selectedToken = token;
+        byte[] key = masterKey.clone(); VaultApi selectedApi = api; String selectedToken = token; String identity = accountIdentity;
         runTask("Шифрование текста OCR…", () -> {
             byte[] bytes = null;
             try {
                 bytes = new JSONObject().put("name", result.name).put("text", result.text).put("expiry", expiry).toString().getBytes(StandardCharsets.UTF_8);
                 selectedApi.saveMetadata(selectedToken, result.id, VaultCrypto.encrypt(key, bytes, "metadata:" + result.id));
+                if (identity != null) try { new ReminderStore(getApplicationContext()).put(identity, result.id, expiry); }
+                    catch (Exception e) { return "Данные сохранены, но напоминание не настроено."; }
                 return "Распознанный текст и срок сохранены в зашифрованном виде.";
             } finally { Arrays.fill(key, (byte) 0); if (bytes != null) Arrays.fill(bytes, (byte) 0); }
-        }, message -> { status.setText(message); refresh(); });
+        }, message -> { status.setText(message); if (!expiry.isEmpty() && !message.contains("не настроено")) enableReminders(); refresh(); });
     }
     private void chooseDocument() {
         if (token == null || masterKey == null) { status.setText("Войдите и разблокируйте хранилище."); return; }
@@ -397,6 +583,6 @@ public final class MainActivity extends Activity {
             return out.toByteArray();
         }
     }
-    private void lock() { if (masterKey != null) Arrays.fill(masterKey, (byte) 0); if (pendingDocument != null) Arrays.fill(pendingDocument, (byte) 0); masterKey = null; pendingDocument = null; documentIds = new String[0]; documentNames = new String[0]; renderDocuments(); updateScreen(); status.setText("Хранилище заблокировано."); }
+    private void lock() { if (masterKey != null) Arrays.fill(masterKey, (byte) 0); if (pendingDocument != null) Arrays.fill(pendingDocument, (byte) 0); masterKey = null; pendingDocument = null; documentIds = new String[0]; documentNames = new String[0]; documentExpiry.clear(); documentText.clear(); searchField.setText(""); renderDocuments(); updateScreen(); status.setText("Хранилище заблокировано."); }
     @Override protected void onDestroy() { if (masterKey != null) Arrays.fill(masterKey, (byte) 0); if (pendingDocument != null) Arrays.fill(pendingDocument, (byte) 0); masterKey = null; pendingDocument = null; token = null; executor.shutdownNow(); super.onDestroy(); }
 }

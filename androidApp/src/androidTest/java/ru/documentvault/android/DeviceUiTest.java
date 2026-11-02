@@ -25,6 +25,30 @@ import static org.junit.Assume.assumeTrue;
 
 @RunWith(AndroidJUnit4.class)
 public final class DeviceUiTest {
+    @Test public void registersNewAccountAndRecoversKey() throws Exception {
+        Instrumentation instrumentation = InstrumentationRegistry.getInstrumentation();
+        assumeTrue("true".equals(InstrumentationRegistry.getArguments().getString("network")));
+        String root = "http://127.0.0.1:17070", username = "reg" + UUID.randomUUID().toString().replace("-", ""), pass = "login-password-123", recovery = "recovery-password-123";
+        Intent intent = new Intent(instrumentation.getTargetContext(), MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
+        Activity activity = instrumentation.startActivitySync(intent);
+        try {
+            waitFor(instrumentation, activity, "Создать аккаунт");
+            instrumentation.runOnMainSync(() -> findByText(activity.getWindow().getDecorView(), "Создать аккаунт").performClick());
+            waitFor(instrumentation, activity, "Зарегистрироваться");
+            instrumentation.runOnMainSync(() -> {
+                View view = activity.getWindow().getDecorView();
+                ((EditText)findByHint(view, "https://example.com")).setText(root);
+                ((EditText)findByHint(view, "От 3 до 40 латинских символов")).setText(username);
+                ((EditText)findByHint(view, "Не менее 12 символов")).setText(pass);
+                ((EditText)findByHint(view, "Отдельный пароль")).setText(recovery);
+                ((EditText)findByHint(view, "Повторите пароль")).setText(recovery);
+                findByText(view, "Зарегистрироваться").performClick();
+            });
+            waitFor(instrumentation, activity, "Войти");
+            VaultApi api = new VaultApi(root); String token = api.login(username, pass);
+            assertEquals(32, api.unlock(token, recovery.toCharArray()).length);
+        } finally { activity.finish(); }
+    }
     @Test public void loginUnlockAndDisplayEncryptedDocumentName() throws Exception {
         Instrumentation instrumentation = InstrumentationRegistry.getInstrumentation();
         assumeTrue("true".equals(InstrumentationRegistry.getArguments().getString("network")));
@@ -37,7 +61,7 @@ public final class DeviceUiTest {
         try { conn.getOutputStream().write(body); assertEquals(201, conn.getResponseCode()); } finally { conn.disconnect(); }
         VaultApi api = new VaultApi(root); String token = api.login(username, pass); String id = UUID.randomUUID().toString();
         api.upload(token, id, VaultCrypto.encrypt(key, "synthetic".getBytes(StandardCharsets.UTF_8), "document:" + id));
-        byte[] metadata = new JSONObject().put("name", "Пример документа.pdf").put("text", "").put("expiry", "").toString().getBytes(StandardCharsets.UTF_8);
+        byte[] metadata = new JSONObject().put("name", "Пример документа.pdf").put("text", "Тестовая запись Иванов").put("expiry", "").toString().getBytes(StandardCharsets.UTF_8);
         api.saveMetadata(token, id, VaultCrypto.encrypt(key, metadata, "metadata:" + id));
 
         Intent intent = new Intent(instrumentation.getTargetContext(), MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
@@ -59,12 +83,18 @@ public final class DeviceUiTest {
             instrumentation.runOnMainSync(() -> {
                 assertNotNull(findByText(activity.getWindow().getDecorView(), "Мои документы"));
                 assertNotNull(findByText(activity.getWindow().getDecorView(), "Камера"));
+                EditText search = (EditText) findByHint(activity.getWindow().getDecorView(), "Поиск по документам");
+                search.setText("1ванов");
+                assertNotNull(findByText(activity.getWindow().getDecorView(), "Пример документа.pdf"));
+                search.setText("отсутствует");
+                assertNotNull(findByText(activity.getWindow().getDecorView(), "Ничего не найдено. Попробуйте другой запрос."));
+                search.setText("");
                 findByText(activity.getWindow().getDecorView(), "Заблокировать").performClick();
                 assertNull(findByText(activity.getWindow().getDecorView(), "Пример документа.pdf"));
             });
         } finally { activity.finish(); }
     }
-    private static void waitFor(Instrumentation instrumentation, Activity activity, String text) throws Exception {
+    static void waitFor(Instrumentation instrumentation, Activity activity, String text) throws Exception {
         long until = System.currentTimeMillis() + 30000;
         while (System.currentTimeMillis() < until) {
             AtomicReference<View> found = new AtomicReference<>();
@@ -74,12 +104,12 @@ public final class DeviceUiTest {
         }
         fail("View not found: " + text);
     }
-    private static View findByText(View root, String text) {
+    static View findByText(View root, String text) {
         if (root instanceof TextView && root.isShown() && text.contentEquals(((TextView)root).getText())) return root;
         if (root instanceof ViewGroup) for (int i = 0; i < ((ViewGroup)root).getChildCount(); i++) { View found = findByText(((ViewGroup)root).getChildAt(i), text); if (found != null) return found; }
         return null;
     }
-    private static View findByHint(View root, String hint) {
+    static View findByHint(View root, String hint) {
         if (root instanceof EditText && root.isShown() && hint.contentEquals(((EditText)root).getHint())) return root;
         if (root instanceof ViewGroup) for (int i = 0; i < ((ViewGroup)root).getChildCount(); i++) { View found = findByHint(((ViewGroup)root).getChildAt(i), hint); if (found != null) return found; }
         return null;
