@@ -20,6 +20,7 @@ import android.view.Gravity;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.HorizontalScrollView;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -48,12 +49,15 @@ public final class MainActivity extends FragmentActivity {
     private static final int CAPTURE_DOCUMENT = 102;
     private static final int NOTIFICATION_PERMISSION = 103;
     private static final int MAX_FILE_BYTES = 15 * 1024 * 1024;
-    private final ExecutorService executor = Executors.newSingleThreadExecutor();
+    private static final String DEFAULT_SERVER = "https://95.174.95.143";
+    private final ExecutorService executor = Executors.newSingleThreadExecutor(r -> new Thread(() -> { android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND); r.run(); }, "vault-worker"));
     private EditText serverField, usernameField, passwordField, recoveryField;
     private EditText registerServer, registerUsername, registerPassword, registerRecovery, registerConfirm;
     private EditText searchField;
     private TextView status, heroTitle, heroSubtitle, documentCount;
-    private LinearLayout loginPanel, registerPanel, unlockPanel, vaultPanel, documentList;
+    private LinearLayout progressPanel;
+    private TextView progressText;
+    private LinearLayout loginPanel, registerPanel, unlockPanel, vaultPanel, documentList, folderBar;
     private VaultApi api;
     private String token;
     private byte[] masterKey;
@@ -62,6 +66,9 @@ public final class MainActivity extends FragmentActivity {
     private String[] documentNames = new String[0];
     private final java.util.Map<String, String> documentExpiry = new java.util.HashMap<>();
     private final java.util.Map<String, String> documentText = new java.util.HashMap<>();
+    private final java.util.Map<String, String> documentFolders = new java.util.HashMap<>();
+    private String selectedFolder = null;
+    private AlertDialog previewDialog;
     private File pendingCapture;
     private BiometricKeyStore biometricStore;
     private String accountIdentity;
@@ -79,6 +86,8 @@ public final class MainActivity extends FragmentActivity {
         if (stale != null) for (File file : stale) if (pendingCapture == null || !file.equals(pendingCapture)) file.delete();
         File[] stalePdf = new File(getCacheDir(), "ocr-pdf").listFiles();
         if (stalePdf != null) for (File file : stalePdf) if (file.isFile() && file.getName().startsWith("document-")) file.delete();
+        File[] stalePreviews = new File(getCacheDir(), "preview").listFiles();
+        if (stalePreviews != null) for (File file : stalePreviews) if (file.isFile() && file.getName().startsWith("preview-")) file.delete();
         getWindow().setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE);
         getWindow().setStatusBarColor(Color.rgb(245, 248, 246));
         getWindow().setNavigationBarColor(Color.rgb(245, 248, 246));
@@ -95,13 +104,16 @@ public final class MainActivity extends FragmentActivity {
         heroTitle = label("Документы\nпод защитой", 30, ink(), true); heroTitle.setLineSpacing(dp(2), 1f); layout.addView(heroTitle);
         space(layout, 8);
         heroSubtitle = label("Войдите, чтобы открыть своё хранилище.", 15, muted(), false); layout.addView(heroSubtitle);
-        space(layout, 24);
+        space(layout, 14); status = label("Укажите адрес сервера и войдите в аккаунт.", 13, muted(), false);
+        status.setPadding(dp(14), dp(12), dp(14), dp(12)); status.setBackground(round(Color.rgb(231, 239, 235), 14)); layout.addView(status);
+        space(layout, 20);
 
         loginPanel = card();
         loginPanel.addView(label("Вход в аккаунт", 19, ink(), true));
         space(loginPanel, 5); loginPanel.addView(label("Используйте данные существующего аккаунта.", 13, muted(), false));
         space(loginPanel, 20);
-        loginPanel.addView(label("Адрес сервера", 12, ink(), true)); serverField = field(loginPanel, "https://example.com", false);
+        loginPanel.addView(label("Адрес сервера · можно изменить", 12, ink(), true)); serverField = field(loginPanel, "https://example.com", false);
+        serverField.setText(getPreferences(MODE_PRIVATE).getString("server_address", DEFAULT_SERVER));
         loginPanel.addView(label("Логин", 12, ink(), true)); usernameField = field(loginPanel, "Ваш логин", false);
         loginPanel.addView(label("Пароль", 12, ink(), true)); passwordField = field(loginPanel, "Пароль входа", true);
         button(loginPanel, "Войти", true, this::login);
@@ -111,7 +123,7 @@ public final class MainActivity extends FragmentActivity {
         registerPanel = card(); registerPanel.addView(label("Новый аккаунт", 19, ink(), true));
         space(registerPanel, 5); registerPanel.addView(label("Пароль восстановления защищает ключ к документам. Сохраните его отдельно.", 13, muted(), false));
         space(registerPanel, 18);
-        registerPanel.addView(label("Адрес сервера", 12, ink(), true)); registerServer = field(registerPanel, "https://example.com", false);
+        registerPanel.addView(label("Адрес сервера · можно изменить", 12, ink(), true)); registerServer = field(registerPanel, "https://example.com", false);
         registerPanel.addView(label("Логин", 12, ink(), true)); registerUsername = field(registerPanel, "От 3 до 40 латинских символов", false);
         registerPanel.addView(label("Пароль входа", 12, ink(), true)); registerPassword = field(registerPanel, "Не менее 12 символов", true);
         registerPanel.addView(label("Пароль восстановления", 12, ink(), true)); registerRecovery = field(registerPanel, "Отдельный пароль", true);
@@ -141,6 +153,12 @@ public final class MainActivity extends FragmentActivity {
             @Override public void onTextChanged(CharSequence text, int start, int before, int count) { renderDocuments(); }
             @Override public void afterTextChanged(android.text.Editable text) { }
         });
+        vaultPanel.addView(label("Поиск по названию и тексту во всех папках", 12, muted(), false));
+        space(vaultPanel, 14);
+        TextView folderLabel = label("Папки", 17, ink(), true); vaultPanel.addView(folderLabel);
+        space(vaultPanel, 8); HorizontalScrollView folders = new HorizontalScrollView(this); folders.setHorizontalScrollBarEnabled(false);
+        folderBar = new LinearLayout(this); folderBar.setOrientation(LinearLayout.HORIZONTAL); folders.addView(folderBar); vaultPanel.addView(folders);
+        space(vaultPanel, 16);
         space(vaultPanel, 2);
         LinearLayout section = new LinearLayout(this); section.setGravity(Gravity.CENTER_VERTICAL);
         TextView sectionTitle = label("Мои документы", 20, ink(), true); section.addView(sectionTitle, new LinearLayout.LayoutParams(0, -2, 1));
@@ -152,11 +170,13 @@ public final class MainActivity extends FragmentActivity {
         space(vaultPanel, 8); button(vaultPanel, "Заблокировать", false, this::lock);
         layout.addView(vaultPanel);
 
-        space(layout, 18);
-        status = label("Укажите адрес сервера и войдите в аккаунт.", 13, muted(), false);
-        status.setPadding(dp(14), dp(12), dp(14), dp(12)); status.setBackground(round(Color.rgb(231, 239, 235), 14)); layout.addView(status);
         space(layout, 18); TextView foot = label("Данные шифруются на устройстве", 12, muted(), false); foot.setGravity(Gravity.CENTER); layout.addView(foot);
-        ScrollView scroll = new ScrollView(this); scroll.setFillViewport(true); scroll.addView(layout); setContentView(scroll);
+        ScrollView scroll = new ScrollView(this); scroll.setFillViewport(true); scroll.addView(layout);
+        android.widget.FrameLayout frame = new android.widget.FrameLayout(this); frame.addView(scroll);
+        progressPanel = new LinearLayout(this); progressPanel.setGravity(Gravity.CENTER_VERTICAL); progressPanel.setPadding(dp(16), dp(12), dp(16), dp(12)); progressPanel.setBackground(round(Color.rgb(22, 79, 71), 16));
+        android.widget.ProgressBar spinner = new android.widget.ProgressBar(this); spinner.setIndeterminate(true); progressPanel.addView(spinner, new LinearLayout.LayoutParams(dp(28), dp(28)));
+        progressText = label("", 14, Color.WHITE, true); progressText.setPadding(dp(12), 0, 0, 0); progressPanel.addView(progressText);
+        android.widget.FrameLayout.LayoutParams progressParams = new android.widget.FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM); progressParams.setMargins(dp(16), 0, dp(16), dp(20)); frame.addView(progressPanel, progressParams); progressPanel.setVisibility(View.GONE); setContentView(frame);
         renderDocuments(); updateScreen();
     }
     private int dp(float value) { return Math.round(value * getResources().getDisplayMetrics().density); }
@@ -185,8 +205,8 @@ public final class MainActivity extends FragmentActivity {
         unlockPanel.setVisibility(loggedIn && !unlocked ? View.VISIBLE : View.GONE);
         vaultPanel.setVisibility(unlocked ? View.VISIBLE : View.GONE);
         biometricUnlock.setVisibility(loggedIn && accountIdentity != null && biometricStore.hasKey(accountIdentity) ? View.VISIBLE : View.GONE);
-        heroTitle.setText(unlocked ? "Всё важное\nрядом" : loggedIn ? "Вход выполнен" : creatingAccount ? "Создайте\nхранилище" : "Документы\nпод защитой");
-        heroSubtitle.setText(unlocked ? "Ваши документы в одном месте." : loggedIn ? "Остался один шаг до ваших документов." : creatingAccount ? "Доступ к документам только у вас." : "Войдите, чтобы открыть своё хранилище.");
+        heroTitle.setText(unlocked ? "Документы" : loggedIn ? "Вход выполнен" : creatingAccount ? "Создайте\nхранилище" : "Документы\nпод защитой");
+        heroSubtitle.setText(unlocked ? "Всё важное под рукой." : loggedIn ? "Остался один шаг до ваших документов." : creatingAccount ? "Доступ к документам только у вас." : "Войдите, чтобы открыть своё хранилище.");
     }
     private void showRegistration() {
         registerServer.setText(serverField.getText()); registerUsername.setText(usernameField.getText()); creatingAccount = true; updateScreen();
@@ -215,17 +235,18 @@ public final class MainActivity extends FragmentActivity {
             try { new VaultApi(address).register(name, password, recovery); return true; }
             finally { Arrays.fill(recovery, '\0'); }
         }, success -> {
-            serverField.setText(address); usernameField.setText(name); creatingAccount = false; updateScreen();
+            rememberServer(address); serverField.setText(address); usernameField.setText(name); creatingAccount = false; updateScreen();
             status.setText("Аккаунт создан. Войдите с паролем входа.");
         });
     }
     private void renderDocuments() {
+        renderFolders();
         documentList.removeAllViews();
         String query = searchField.getText().toString().trim();
         int matches = 0;
         for (int i = 0; i < documentIds.length; i++) {
             String name = i < documentNames.length ? documentNames[i] : documentIds[i];
-            if (query.isEmpty() || OcrSearch.matches(name + " " + documentText.getOrDefault(documentIds[i], ""), query)) matches++;
+            if ((!query.isEmpty() || selectedFolder == null || selectedFolder.equals(documentFolders.getOrDefault(documentIds[i], ""))) && (query.isEmpty() || OcrSearch.matches(name + " " + documentText.getOrDefault(documentIds[i], ""), query))) matches++;
         }
         documentCount.setText(String.valueOf(matches));
         if (matches == 0 && !query.isEmpty()) {
@@ -235,37 +256,96 @@ public final class MainActivity extends FragmentActivity {
             LinearLayout empty = card(); TextView title = label("Здесь пока пусто", 16, ink(), true); title.setGravity(Gravity.CENTER); empty.addView(title);
             space(empty, 6); TextView hint = label("Добавьте файл или сделайте снимок документа.", 13, muted(), false); hint.setGravity(Gravity.CENTER); empty.addView(hint); documentList.addView(empty); return;
         }
+        if (matches == 0) { LinearLayout empty = card(); empty.addView(label("В этой папке пока нет документов.", 14, muted(), false)); documentList.addView(empty); return; }
         for (int i = 0; i < documentIds.length; i++) {
             final String id = documentIds[i]; String name = i < documentNames.length ? documentNames[i] : id;
+            if (query.isEmpty() && selectedFolder != null && !selectedFolder.equals(documentFolders.getOrDefault(id, ""))) continue;
             if (!query.isEmpty() && !OcrSearch.matches(name + " " + documentText.getOrDefault(id, ""), query)) continue;
             LinearLayout row = new LinearLayout(this); row.setPadding(dp(14), dp(14), dp(14), dp(14)); row.setGravity(Gravity.CENTER_VERTICAL); row.setBackground(round(Color.WHITE, 16));
-            TextView icon = label("DOC", 11, Color.rgb(23, 99, 81), true); icon.setGravity(Gravity.CENTER); icon.setBackground(round(Color.rgb(226, 240, 233), 12)); row.addView(icon, new LinearLayout.LayoutParams(dp(46), dp(46)));
+            String type = name.toLowerCase(java.util.Locale.ROOT).endsWith(".pdf") ? "PDF" : "IMG";
+            TextView icon = label(type, 11, Color.rgb(23, 99, 81), true); icon.setGravity(Gravity.CENTER); icon.setBackground(round(Color.rgb(226, 240, 233), 12)); row.addView(icon, new LinearLayout.LayoutParams(dp(46), dp(46)));
             LinearLayout detail = column(); detail.setPadding(dp(12), 0, dp(8), 0); TextView title = label(name, 15, ink(), true); title.setMaxLines(1); title.setEllipsize(android.text.TextUtils.TruncateAt.END); detail.addView(title);
             String expiry = documentExpiry.get(id);
-            detail.addView(label(expiry == null ? "Срок не указан" : "Действует до " + expiry, 12, muted(), false)); row.addView(detail, new LinearLayout.LayoutParams(0, -2, 1)); row.addView(label("›", 24, muted(), false));
-            row.setOnClickListener(v -> { if (!busy) new AlertDialog.Builder(this).setTitle(name).setItems(new String[]{"Сохранить файл", "Изменить срок"}, (dialog, which) -> { if (which == 0) download(id); else editExpiry(id); }).setNegativeButton("Отмена", null).show(); });
+            String folder = documentFolders.getOrDefault(id, "");
+            detail.addView(label((folder.isEmpty() ? "Без папки" : folder) + " · " + (expiry == null ? "Срок не указан" : "До " + expiry), 12, muted(), false)); row.addView(detail, new LinearLayout.LayoutParams(0, -2, 1)); row.addView(label("›", 24, muted(), false));
+            row.setOnClickListener(v -> { if (!busy) showDocumentActions(id, name); });
             documentList.addView(row); space(documentList, 8);
         }
+    }
+    private void renderFolders() {
+        folderBar.removeAllViews();
+        java.util.Set<String> names = new java.util.TreeSet<>(); names.addAll(documentFolders.values()); names.remove("");
+        addFolderChip("Все", null); addFolderChip("Без папки", "");
+        for (String name : names) addFolderChip(name, name);
+    }
+    private void addFolderChip(String title, String folder) {
+        TextView chip = label(title, 13, java.util.Objects.equals(selectedFolder, folder) ? Color.WHITE : Color.rgb(25, 86, 74), true);
+        chip.setPadding(dp(16), dp(10), dp(16), dp(10)); chip.setBackground(round(java.util.Objects.equals(selectedFolder, folder) ? Color.rgb(22, 97, 81) : Color.rgb(226, 239, 232), 16));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-2, -2); params.setMargins(0, 0, dp(8), 0); folderBar.addView(chip, params);
+        chip.setOnClickListener(v -> { selectedFolder = folder; renderDocuments(); });
+    }
+    private AlertDialog showDocumentActions(String id, String name) {
+        LinearLayout content = column(); content.setPadding(dp(20), dp(12), dp(20), dp(16));
+        TextView title = label(name, 19, ink(), true); content.addView(title); space(content, 6);
+        String folder = documentFolders.getOrDefault(id, ""); String expiry = documentExpiry.get(id);
+        content.addView(label((folder.isEmpty() ? "Без папки" : folder) + " · " + (expiry == null ? "Срок не указан" : "До " + expiry), 13, muted(), false)); space(content, 16);
+        AlertDialog dialog = new AlertDialog.Builder(this).setView(content).create();
+        button(content, "Открыть документ", true, () -> { dialog.dismiss(); preview(id); }); space(content, 8);
+        button(content, "Просмотр с текстом OCR", false, () -> { dialog.dismiss(); previewWithOcr(id); }); space(content, 8);
+        button(content, "Переименовать", false, () -> { dialog.dismiss(); renameDocument(id, name); }); space(content, 8);
+        button(content, "Переместить в папку", false, () -> { dialog.dismiss(); moveToFolder(id); }); space(content, 8);
+        button(content, "Распознать текст заново", false, () -> { dialog.dismiss(); reanalyze(id, true); }); space(content, 8);
+        button(content, "Распознать без обрезки", false, () -> { dialog.dismiss(); reanalyze(id, false); }); space(content, 8);
+        button(content, "Изменить срок", false, () -> { dialog.dismiss(); editExpiry(id); }); space(content, 8);
+        button(content, "Сохранить на устройство", false, () -> { dialog.dismiss(); download(id); });
+        ScrollView scroll = new ScrollView(this); scroll.addView(content); dialog.setView(scroll); dialog.show(); return dialog;
+    }
+    private void renameDocument(String id, String oldName) {
+        EditText input = new EditText(this); input.setSingleLine(true); input.setText(oldName); input.selectAll();
+        AlertDialog dialog = new AlertDialog.Builder(this).setTitle("Переименовать документ").setView(input).setNegativeButton("Отмена", null).setPositiveButton("Сохранить", null).create();
+        dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+            String name = input.getText().toString().trim();
+            if (name.isEmpty() || name.equals(".") || name.equals("..") || name.contains("/") || name.contains("\\") || name.getBytes(StandardCharsets.UTF_8).length > 240) { input.setError("Введите название до 240 байт без слешей."); return; }
+            int dot = oldName.lastIndexOf('.'); String extension = dot > 0 ? oldName.substring(dot) : "";
+            if (!extension.isEmpty() && !name.toLowerCase(java.util.Locale.ROOT).endsWith(extension.toLowerCase(java.util.Locale.ROOT))) name += extension;
+            dialog.dismiss(); saveName(id, name);
+        })); dialog.show();
+    }
+    private void saveName(String id, String name) {
+        if (masterKey == null || token == null) return;
+        byte[] key = masterKey.clone(); VaultApi selectedApi = api; String selectedToken = token;
+        runTask("Переименовываем…", () -> {
+            byte[] plain = null, updated = null;
+            try {
+                byte[] encrypted = selectedApi.metadata(selectedToken, id);
+                JSONObject data;
+                if (encrypted == null) data = new JSONObject();
+                else { plain = VaultCrypto.decrypt(key, encrypted, "metadata:" + id); data = new JSONObject(new String(plain, StandardCharsets.UTF_8)); }
+                data.put("name", name); updated = data.toString().getBytes(StandardCharsets.UTF_8);
+                selectedApi.saveMetadata(selectedToken, id, VaultCrypto.encrypt(key, updated, "metadata:" + id)); return true;
+            } finally { Arrays.fill(key, (byte) 0); if (plain != null) Arrays.fill(plain, (byte) 0); if (updated != null) Arrays.fill(updated, (byte) 0); }
+        }, ignored -> refresh("Документ переименован."));
     }
     private interface Task<T> { T run() throws Exception; }
     private interface Done<T> { void accept(T value); }
     private <T> void runTask(String message, Task<T> task, Done<T> done) {
         if (busy) return;
-        busy = true; status.setText(message);
+        busy = true; status.setText(message); progressText.setText(message); progressPanel.setVisibility(View.VISIBLE);
         executor.execute(() -> {
             try {
                 T value = task.run();
                 runOnUiThread(() -> {
-                    busy = false;
+                    busy = false; progressPanel.setVisibility(View.GONE);
                     if (!isFinishing() && !isDestroyed()) done.accept(value);
                     else if (value instanceof byte[]) Arrays.fill((byte[]) value, (byte) 0);
                     else if (value instanceof FileData) Arrays.fill(((FileData) value).content, (byte) 0);
                 });
             } catch (Exception e) {
-                runOnUiThread(() -> { busy = false; if (!isFinishing() && !isDestroyed()) status.setText("Ошибка: " + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage())); });
+                runOnUiThread(() -> { busy = false; if (!isFinishing() && !isDestroyed()) { progressPanel.setVisibility(View.GONE); String error = "Ошибка: " + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()); status.setText(error); android.widget.Toast.makeText(this, error, android.widget.Toast.LENGTH_LONG).show(); } });
             }
         });
     }
+    private void taskMessage(String message) { runOnUiThread(() -> { if (!isFinishing() && !isDestroyed() && busy) { progressText.setText(message); status.setText(message); } }); }
     private void login() {
         if (token != null) { status.setText("Сначала закройте приложение для смены аккаунта."); return; }
         String address = serverField.getText().toString().trim();
@@ -274,7 +354,10 @@ public final class MainActivity extends FragmentActivity {
         runTask("Вход…", () -> {
             VaultApi selectedApi = new VaultApi(address);
             return new LoginResult(selectedApi, selectedApi.login(username, password), address + "\u0000" + username.toLowerCase(java.util.Locale.ROOT));
-        }, result -> { api = result.api; token = result.token; accountIdentity = result.identity; updateScreen(); status.setText("Вход выполнен. Разблокируйте хранилище."); });
+        }, result -> { rememberServer(address); api = result.api; token = result.token; accountIdentity = result.identity; updateScreen(); status.setText("Вход выполнен. Разблокируйте хранилище."); });
+    }
+    private void rememberServer(String address) {
+        if (address.regionMatches(true, 0, "https://", 0, 8)) getPreferences(MODE_PRIVATE).edit().putString("server_address", address).apply();
     }
     private static final class LoginResult {
         final VaultApi api; final String token, identity;
@@ -294,7 +377,7 @@ public final class MainActivity extends FragmentActivity {
         VaultApi selectedApi = api; String selectedToken = token;
         runTask("Выход…", () -> { selectedApi.logout(selectedToken); return true; }, ignored -> {
             if (masterKey != null) Arrays.fill(masterKey, (byte) 0);
-            masterKey = null; token = null; api = null; accountIdentity = null; documentIds = new String[0]; documentNames = new String[0]; documentExpiry.clear(); documentText.clear(); searchField.setText("");
+            masterKey = null; token = null; api = null; accountIdentity = null; documentIds = new String[0]; documentNames = new String[0]; documentExpiry.clear(); documentText.clear(); documentFolders.clear(); selectedFolder = null; searchField.setText("");
             renderDocuments(); updateScreen(); status.setText("Вы вышли из аккаунта.");
         });
     }
@@ -308,6 +391,7 @@ public final class MainActivity extends FragmentActivity {
                 String[] ids = new String[list.length()], names = new String[list.length()];
                 java.util.Map<String, String> dates = new java.util.HashMap<>();
                 java.util.Map<String, String> texts = new java.util.HashMap<>();
+                java.util.Map<String, String> folders = new java.util.HashMap<>();
                 for (int i = 0; i < list.length(); i++) {
                     ids[i] = list.getJSONObject(i).getString("id"); names[i] = ids[i];
                     if (key != null) {
@@ -317,6 +401,7 @@ public final class MainActivity extends FragmentActivity {
                             try { JSONObject data = new JSONObject(new String(plain, StandardCharsets.UTF_8));
                                 String name = data.optString("name", ""); if (!name.trim().isEmpty()) names[i] = name;
                                 String text = data.optString("text", ""); if (!text.isEmpty()) texts.put(ids[i], text);
+                                String folder = data.optString("folder", ""); if (!folder.isEmpty()) folders.put(ids[i], folder);
                                 String date = data.optString("expiry", ""); if (!date.isEmpty()) { java.time.LocalDate.parse(date); dates.put(ids[i], date); }
                             }
                             finally { Arrays.fill(plain, (byte) 0); }
@@ -325,18 +410,49 @@ public final class MainActivity extends FragmentActivity {
                 }
                 boolean reminderError = false;
                 if (key != null && identity != null) try { new ReminderStore(getApplicationContext()).replaceAccount(identity, dates); } catch (Exception e) { reminderError = true; }
-                return new DocumentListing(ids, names, dates, texts, reminderError);
+                return new DocumentListing(ids, names, dates, texts, folders, reminderError);
             } finally { if (key != null) Arrays.fill(key, (byte) 0); }
         }, listing -> {
-            documentIds = listing.ids; documentNames = listing.names; documentExpiry.clear(); documentExpiry.putAll(listing.dates); documentText.clear(); documentText.putAll(listing.texts); renderDocuments();
+            documentIds = listing.ids; documentNames = listing.names; documentExpiry.clear(); documentExpiry.putAll(listing.dates); documentText.clear(); documentText.putAll(listing.texts); documentFolders.clear(); documentFolders.putAll(listing.folders); renderDocuments();
             String resultMessage = completionMessage == null ? "Документы обновлены." : completionMessage;
             status.setText(listing.reminderError ? resultMessage + " Напоминания не обновлены." : resultMessage);
             if (!listing.reminderError && !listing.dates.isEmpty()) enableReminders();
         });
     }
     private static final class DocumentListing {
-        final String[] ids, names; final java.util.Map<String, String> dates, texts; final boolean reminderError;
-        DocumentListing(String[] ids, String[] names, java.util.Map<String, String> dates, java.util.Map<String, String> texts, boolean reminderError) { this.ids = ids; this.names = names; this.dates = dates; this.texts = texts; this.reminderError = reminderError; }
+        final String[] ids, names; final java.util.Map<String, String> dates, texts, folders; final boolean reminderError;
+        DocumentListing(String[] ids, String[] names, java.util.Map<String, String> dates, java.util.Map<String, String> texts, java.util.Map<String, String> folders, boolean reminderError) { this.ids = ids; this.names = names; this.dates = dates; this.texts = texts; this.folders = folders; this.reminderError = reminderError; }
+    }
+    private void moveToFolder(String id) {
+        if (masterKey == null || token == null) return;
+        java.util.Set<String> existing = new java.util.TreeSet<>(); existing.addAll(documentFolders.values()); existing.remove("");
+        java.util.List<String> choices = new java.util.ArrayList<>(); choices.add("Без папки"); choices.addAll(existing); choices.add("+ Новая папка");
+        new AlertDialog.Builder(this).setTitle("Переместить документ").setItems(choices.toArray(new String[0]), (dialog, which) -> {
+            if (which == choices.size() - 1) {
+                EditText input = new EditText(this); input.setSingleLine(true); input.setHint("Название папки");
+                new AlertDialog.Builder(this).setTitle("Новая папка").setView(input).setNegativeButton("Отмена", null).setPositiveButton("Переместить", (d, w) -> {
+                    String value = input.getText().toString().trim();
+                    if (value.isEmpty() || value.length() > 80 || value.contains("/") || value.contains("\\")) { status.setText("Название папки: от 1 до 80 символов, без слешей."); return; }
+                    saveFolder(id, value);
+                }).show();
+            } else saveFolder(id, which == 0 ? "" : choices.get(which));
+        }).setNegativeButton("Отмена", null).show();
+    }
+    private void saveFolder(String id, String folder) {
+        if (masterKey == null || token == null) return;
+        byte[] key = masterKey.clone(); VaultApi selectedApi = api; String selectedToken = token;
+        runTask("Сохраняем папку…", () -> {
+            byte[] plain = null, updated = null;
+            try {
+                byte[] encrypted = selectedApi.metadata(selectedToken, id);
+                JSONObject data;
+                if (encrypted == null) data = new JSONObject();
+                else { plain = VaultCrypto.decrypt(key, encrypted, "metadata:" + id); data = new JSONObject(new String(plain, StandardCharsets.UTF_8)); }
+                data.put("folder", folder); updated = data.toString().getBytes(StandardCharsets.UTF_8);
+                selectedApi.saveMetadata(selectedToken, id, VaultCrypto.encrypt(key, updated, "metadata:" + id));
+                return true;
+            } finally { Arrays.fill(key, (byte) 0); if (plain != null) Arrays.fill(plain, (byte) 0); if (updated != null) Arrays.fill(updated, (byte) 0); }
+        }, ignored -> { selectedFolder = folder; refresh("Документ перемещён."); });
     }
     private void editExpiry(String id) {
         if (masterKey == null || token == null) { status.setText("Сначала разблокируйте хранилище."); return; }
@@ -501,7 +617,12 @@ public final class MainActivity extends FragmentActivity {
                 finally { Arrays.fill(metadata, (byte) 0); }
                 String mime = getContentResolver().getType(uri);
                 boolean isPdf = (mime != null && mime.equals("application/pdf")) || name.toLowerCase(java.util.Locale.ROOT).endsWith(".pdf");
-                try { return new UploadResult(id, name, isPdf ? LocalOcr.recognizePdf(getApplicationContext(), file) : LocalOcr.recognize(getApplicationContext(), file), "Документ загружен и распознан."); }
+                taskMessage("Распознаём текст…");
+                try {
+                    if (isPdf) return new UploadResult(id, name, LocalOcr.recognizePdf(getApplicationContext(), file, (page, total) -> taskMessage("Распознаём страницу " + page + " из " + total + "…")), "Документ загружен и распознан.");
+                    LocalOcr.ImageResult result = LocalOcr.recognizeImage(getApplicationContext(), file);
+                    return new UploadResult(id, name, result.text, result.cropped ? "Границы документа найдены. Проверьте результат." : "Границы не найдены: распознано исходное фото.", result.layout.toString());
+                }
                 catch (Exception | LinkageError error) { return new UploadResult(id, name, null, "Документ загружен, но OCR не сработал: " + error.getClass().getSimpleName()); }
             } finally { Arrays.fill(key, (byte) 0); if (file != null) Arrays.fill(file, (byte) 0); if (payload != null) Arrays.fill(payload, (byte) 0); if (temporaryCapture != null) temporaryCapture.delete(); }
         }, result -> {
@@ -510,14 +631,26 @@ public final class MainActivity extends FragmentActivity {
         });
     }
     private static final class UploadResult {
-        final String id, name, text, message;
-        UploadResult(String id, String name, String text, String message) { this.id = id; this.name = name; this.text = text; this.message = message; }
+        final String id, name, text, message, layout;
+        UploadResult(String id, String name, String text, String message) { this(id, name, text, message, null); }
+        UploadResult(String id, String name, String text, String message, String layout) { this.id = id; this.name = name; this.text = text; this.message = message; this.layout = layout; }
+    }
+    private void reanalyze(String id, boolean detectPage) {
+        loadFile(id, file -> runTask("Распознаём текст…", () -> {
+            try {
+                boolean pdf = file.name.toLowerCase(java.util.Locale.ROOT).endsWith(".pdf");
+                if (pdf) return new UploadResult(id, file.name, LocalOcr.recognizePdf(getApplicationContext(), file.content, (page, total) -> taskMessage("Распознаём страницу " + page + " из " + total + "…")), "Распознавание завершено.");
+                LocalOcr.ImageResult result = LocalOcr.recognizeImage(getApplicationContext(), file.content, detectPage);
+                return new UploadResult(id, file.name, result.text, result.cropped ? "Границы документа найдены. Проверьте результат." : detectPage ? "Границы не найдены: распознано исходное фото." : "Распознано исходное фото без обрезки.", result.layout.toString());
+            } finally { Arrays.fill(file.content, (byte) 0); }
+        }, this::confirmOcr));
     }
     private AlertDialog confirmOcr(UploadResult result) {
         LinearLayout content = new LinearLayout(this); content.setOrientation(LinearLayout.VERTICAL); content.setPadding(24, 12, 24, 12);
+        TextView scanStatus = new TextView(this); scanStatus.setText(result.message); content.addView(scanStatus);
         java.util.List<java.time.LocalDate> dates = DateSuggestions.find(result.text);
-        TextView label = new TextView(this); label.setText("Выберите срок из найденных дат или укажите его вручную в формате ГГГГ-ММ-ДД. Если срока нет, оставьте поле пустым."); content.addView(label);
-        EditText expiry = new EditText(this); expiry.setHint("ГГГГ-ММ-ДД"); expiry.setSingleLine(true); content.addView(expiry);
+        TextView label = new TextView(this); label.setText("Выберите срок или укажите его вручную в формате ГГГГ-ММ-ДД. Если при правке изменится число слов, наложение потребуется создать заново."); content.addView(label);
+        EditText expiry = new EditText(this); expiry.setHint("ГГГГ-ММ-ДД"); expiry.setSingleLine(true); expiry.setText(documentExpiry.getOrDefault(result.id, "")); content.addView(expiry);
         if (!dates.isEmpty()) {
             HorizontalScrollView dateScroll = new HorizontalScrollView(this);
             LinearLayout choices = new LinearLayout(this); choices.setOrientation(LinearLayout.HORIZONTAL);
@@ -528,7 +661,7 @@ public final class MainActivity extends FragmentActivity {
             dateScroll.addView(choices); content.addView(dateScroll);
             if (dates.size() > 12) { TextView more = new TextView(this); more.setText("Показаны первые 12 дат. Другую дату можно ввести вручную."); content.addView(more); }
         }
-        TextView text = new TextView(this); text.setText(result.text); ScrollView scroll = new ScrollView(this); scroll.addView(text); content.addView(scroll, new LinearLayout.LayoutParams(-1, 400));
+        EditText text = new EditText(this); text.setText(result.text); text.setGravity(Gravity.TOP | Gravity.START); text.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES); content.addView(text, new LinearLayout.LayoutParams(-1, dp(180)));
         AlertDialog dialog = new AlertDialog.Builder(this).setTitle("Проверьте результат OCR").setView(content)
             .setNegativeButton("Не сохранять", (ignoredDialog, which) -> refresh("Текст OCR не сохранён."))
             .setPositiveButton("Сохранить", null).create();
@@ -536,7 +669,8 @@ public final class MainActivity extends FragmentActivity {
             String value = expiry.getText().toString().trim();
             if (!value.isEmpty()) try { java.time.LocalDate.parse(value); }
             catch (java.time.DateTimeException error) { expiry.setError("Укажите дату в формате ГГГГ-ММ-ДД"); return; }
-            dialog.dismiss(); saveOcr(result, value);
+            String corrected = text.getText().toString(); String layout = corrected.equals(result.text) ? result.layout : OcrOverlay.correctedLayout(result.layout, corrected);
+            dialog.dismiss(); saveOcr(new UploadResult(result.id, result.name, corrected, result.message, layout), value);
         }));
         dialog.show();
         return dialog;
@@ -546,14 +680,18 @@ public final class MainActivity extends FragmentActivity {
         if (!expiry.isEmpty()) try { java.time.LocalDate.parse(expiry); } catch (java.time.DateTimeException e) { status.setText("Неверная дата. Текст OCR не сохранён."); return; }
         byte[] key = masterKey.clone(); VaultApi selectedApi = api; String selectedToken = token; String identity = accountIdentity;
         runTask("Шифрование текста OCR…", () -> {
-            byte[] bytes = null;
+            byte[] bytes = null, plain = null;
             try {
-                bytes = new JSONObject().put("name", result.name).put("text", result.text).put("expiry", expiry).toString().getBytes(StandardCharsets.UTF_8);
+                byte[] old = selectedApi.metadata(selectedToken, result.id); JSONObject data;
+                if (old == null) data = new JSONObject(); else { plain = VaultCrypto.decrypt(key, old, "metadata:" + result.id); data = new JSONObject(new String(plain, StandardCharsets.UTF_8)); }
+                data.put("name", result.name).put("text", result.text).put("expiry", expiry);
+                if (result.layout == null) data.remove("ocrLayout"); else data.put("ocrLayout", new JSONObject(result.layout));
+                bytes = data.toString().getBytes(StandardCharsets.UTF_8);
                 selectedApi.saveMetadata(selectedToken, result.id, VaultCrypto.encrypt(key, bytes, "metadata:" + result.id));
                 if (identity != null) try { new ReminderStore(getApplicationContext()).put(identity, result.id, expiry); }
                     catch (Exception e) { return "Данные сохранены, но напоминание не настроено."; }
                 return "Распознанный текст и срок сохранены в зашифрованном виде.";
-            } finally { Arrays.fill(key, (byte) 0); if (bytes != null) Arrays.fill(bytes, (byte) 0); }
+            } finally { Arrays.fill(key, (byte) 0); if (bytes != null) Arrays.fill(bytes, (byte) 0); if (plain != null) Arrays.fill(plain, (byte) 0); }
         }, message -> { if (!expiry.isEmpty() && !message.contains("не настроено")) enableReminders(); refresh(message); });
     }
     private void chooseDocument() {
@@ -563,7 +701,38 @@ public final class MainActivity extends FragmentActivity {
             .setItems(documentIds, (dialog, selected) -> download(documentIds[selected])).setNegativeButton("Отмена", null).show();
     }
     private void download(String id) {
+        loadFile(id, file -> {
+            if (pendingDocument != null) Arrays.fill(pendingDocument, (byte) 0);
+            pendingDocument = file.content;
+            Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT); intent.addCategory(Intent.CATEGORY_OPENABLE); intent.setType("application/octet-stream"); intent.putExtra(Intent.EXTRA_TITLE, file.name);
+            startActivityForResult(intent, SAVE_DOCUMENT);
+        });
+    }
+    private void preview(String id) { loadFile(id, this::showPreview); }
+    private void previewWithOcr(String id) {
+        if (masterKey == null || token == null) return;
+        loadFile(id, file -> {
+            if (masterKey == null || token == null) { Arrays.fill(file.content, (byte) 0); return; }
+            byte[] key = masterKey.clone(); VaultApi selectedApi = api; String selectedToken = token;
+            runTask("Готовим просмотр с текстом…", () -> {
+            byte[] plain = null; android.graphics.Bitmap image = null, overlay = null;
+            try {
+                if (file.name.toLowerCase(java.util.Locale.ROOT).endsWith(".pdf")) throw new IllegalArgumentException("Наложение OCR пока доступно для изображений.");
+                byte[] encrypted = selectedApi.metadata(selectedToken, id);
+                if (encrypted == null) throw new IllegalArgumentException("Сначала распознайте документ заново.");
+                plain = VaultCrypto.decrypt(key, encrypted, "metadata:" + id); JSONObject layout = new JSONObject(new String(plain, StandardCharsets.UTF_8)).optJSONObject("ocrLayout");
+                if (layout == null || layout.optJSONArray("words") == null || layout.optJSONArray("words").length() == 0) throw new IllegalArgumentException("Нет координат текста. Распознайте документ заново и сохраните без правок.");
+                image = LocalOcr.decodeImage(file.content); overlay = OcrOverlay.render(image, layout);
+                ByteArrayOutputStream output = new ByteArrayOutputStream(); if (!overlay.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, output)) throw new IllegalStateException("Не удалось подготовить просмотр.");
+                return new FileData("Распознанный текст.png", output.toByteArray());
+            } finally { Arrays.fill(key, (byte) 0); Arrays.fill(file.content, (byte) 0); if (plain != null) Arrays.fill(plain, (byte) 0); if (image != null) image.recycle(); if (overlay != null) overlay.recycle(); }
+            }, this::showPreview);
+        });
+    }
+    private void loadFile(String id, Done<FileData> done) {
         byte[] key = masterKey.clone(); VaultApi selectedApi = api; String selectedToken = token;
+        String displayName = null; for (int i = 0; i < documentIds.length; i++) if (documentIds[i].equals(id) && i < documentNames.length && !documentNames[i].equals(id)) { displayName = documentNames[i]; break; }
+        final String selectedName = displayName;
         runTask("Загрузка и расшифровка…", () -> {
             byte[] plain = null;
             try {
@@ -577,14 +746,60 @@ public final class MainActivity extends FragmentActivity {
                 name = name.substring(name.lastIndexOf('/') + 1);
                 if (name.trim().isEmpty() || name.equals(".") || name.equals("..")) name = "document";
                 byte[] content = new byte[buffer.remaining()]; buffer.get(content);
-                return new FileData(name, content);
+                return new FileData(selectedName == null ? name : selectedName, content);
             } finally { Arrays.fill(key, (byte) 0); if (plain != null) Arrays.fill(plain, (byte) 0); }
-        }, file -> {
-            if (pendingDocument != null) Arrays.fill(pendingDocument, (byte) 0);
-            pendingDocument = file.content;
-            Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT); intent.addCategory(Intent.CATEGORY_OPENABLE); intent.setType("application/octet-stream"); intent.putExtra(Intent.EXTRA_TITLE, file.name);
-            startActivityForResult(intent, SAVE_DOCUMENT);
-        });
+        }, done);
+    }
+    private void showPreview(FileData file) {
+        try {
+            if (file.name.toLowerCase(java.util.Locale.ROOT).endsWith(".pdf")) { showPdfPreview(file); return; }
+            android.graphics.BitmapFactory.Options bounds = new android.graphics.BitmapFactory.Options(); bounds.inJustDecodeBounds = true;
+            android.graphics.BitmapFactory.decodeByteArray(file.content, 0, file.content.length, bounds);
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) throw new IllegalArgumentException("Формат не поддерживает просмотр. Сохраните файл на устройство.");
+            android.graphics.BitmapFactory.Options options = new android.graphics.BitmapFactory.Options();
+            int sample = 1; while (((long) Math.max(bounds.outWidth, bounds.outHeight) + sample - 1) / sample > 2000) sample *= 2;
+            options.inSampleSize = sample;
+            android.graphics.Bitmap decoded = android.graphics.BitmapFactory.decodeByteArray(file.content, 0, file.content.length, options);
+            if (decoded == null) throw new IllegalArgumentException("Не удалось открыть изображение.");
+            int orientation = 1;
+            try { orientation = new android.media.ExifInterface(new java.io.ByteArrayInputStream(file.content)).getAttributeInt(android.media.ExifInterface.TAG_ORIENTATION, 1); } catch (java.io.IOException ignored) { }
+            android.graphics.Bitmap image;
+            try { image = LocalOcr.orientBitmap(decoded, orientation); } catch (Throwable e) { decoded.recycle(); throw e; }
+            if (image != decoded) decoded.recycle();
+            ImageView view = new ImageView(this); view.setImageBitmap(image); view.setAdjustViewBounds(true); view.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            previewDialog = new AlertDialog.Builder(this).setTitle(file.name).setView(view).setPositiveButton("Закрыть", null).create();
+            previewDialog.setOnDismissListener(d -> { view.setImageDrawable(null); image.recycle(); previewDialog = null; }); previewDialog.show();
+        } catch (Exception e) { status.setText("Просмотр: " + e.getMessage()); }
+        finally { Arrays.fill(file.content, (byte) 0); }
+    }
+    private void showPdfPreview(FileData file) throws Exception {
+        File directory = new File(getCacheDir(), "preview");
+        if (!directory.isDirectory() && !directory.mkdirs()) throw new IllegalStateException("Не удалось подготовить просмотр");
+        File temporary = File.createTempFile("preview-", ".pdf", directory);
+        android.os.ParcelFileDescriptor descriptor = null; android.graphics.pdf.PdfRenderer renderer = null;
+        try {
+            try (java.io.FileOutputStream out = new java.io.FileOutputStream(temporary)) { out.write(file.content); }
+            descriptor = android.os.ParcelFileDescriptor.open(temporary, android.os.ParcelFileDescriptor.MODE_READ_ONLY);
+            renderer = new android.graphics.pdf.PdfRenderer(descriptor);
+            if (renderer.getPageCount() < 1) throw new IllegalArgumentException("PDF не содержит страниц.");
+            final android.os.ParcelFileDescriptor opened = descriptor; final android.graphics.pdf.PdfRenderer pdf = renderer;
+            LinearLayout content = column(); ImageView image = new ImageView(this); image.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            content.addView(image, new LinearLayout.LayoutParams(-1, dp(430))); TextView pageLabel = label("", 14, muted(), true); pageLabel.setGravity(Gravity.CENTER); content.addView(pageLabel);
+            LinearLayout controls = new LinearLayout(this); Button previous = new Button(this), next = new Button(this); previous.setText("Назад"); next.setText("Далее");
+            controls.addView(previous, new LinearLayout.LayoutParams(0, -2, 1)); controls.addView(next, new LinearLayout.LayoutParams(0, -2, 1)); content.addView(controls);
+            int[] page = {0}; android.graphics.Bitmap[] shown = {null};
+            Runnable render = () -> { try (android.graphics.pdf.PdfRenderer.Page current = pdf.openPage(page[0])) {
+                float scale = Math.min(2f, 1800f / Math.max(current.getWidth(), current.getHeight()));
+                android.graphics.Bitmap bitmap = android.graphics.Bitmap.createBitmap(Math.max(1, Math.round(current.getWidth() * scale)), Math.max(1, Math.round(current.getHeight() * scale)), android.graphics.Bitmap.Config.ARGB_8888);
+                bitmap.eraseColor(Color.WHITE); current.render(bitmap, null, null, android.graphics.pdf.PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY);
+                image.setImageBitmap(bitmap); if (shown[0] != null) shown[0].recycle(); shown[0] = bitmap;
+                pageLabel.setText("Страница " + (page[0] + 1) + " из " + pdf.getPageCount()); previous.setEnabled(page[0] > 0); next.setEnabled(page[0] + 1 < pdf.getPageCount());
+            } catch (Exception e) { status.setText("Не удалось открыть страницу PDF."); } };
+            previous.setOnClickListener(v -> { if (page[0] > 0) { page[0]--; render.run(); } }); next.setOnClickListener(v -> { if (page[0] + 1 < pdf.getPageCount()) { page[0]++; render.run(); } });
+            previewDialog = new AlertDialog.Builder(this).setTitle(file.name).setView(content).setPositiveButton("Закрыть", null).create();
+            previewDialog.setOnDismissListener(d -> { image.setImageDrawable(null); if (shown[0] != null) shown[0].recycle(); pdf.close(); try { opened.close(); } catch (java.io.IOException ignored) { } temporary.delete(); previewDialog = null; });
+            previewDialog.show(); render.run();
+        } catch (Exception e) { if (renderer != null) renderer.close(); if (descriptor != null) try { descriptor.close(); } catch (java.io.IOException ignored) { } temporary.delete(); throw e; }
     }
     private static final class FileData {
         final String name; final byte[] content;
@@ -604,6 +819,6 @@ public final class MainActivity extends FragmentActivity {
             return out.toByteArray();
         }
     }
-    private void lock() { if (masterKey != null) Arrays.fill(masterKey, (byte) 0); if (pendingDocument != null) Arrays.fill(pendingDocument, (byte) 0); masterKey = null; pendingDocument = null; documentIds = new String[0]; documentNames = new String[0]; documentExpiry.clear(); documentText.clear(); searchField.setText(""); renderDocuments(); updateScreen(); status.setText("Хранилище заблокировано."); }
-    @Override protected void onDestroy() { if (masterKey != null) Arrays.fill(masterKey, (byte) 0); if (pendingDocument != null) Arrays.fill(pendingDocument, (byte) 0); masterKey = null; pendingDocument = null; token = null; executor.shutdownNow(); super.onDestroy(); }
+    private void lock() { if (previewDialog != null) previewDialog.dismiss(); if (masterKey != null) Arrays.fill(masterKey, (byte) 0); if (pendingDocument != null) Arrays.fill(pendingDocument, (byte) 0); masterKey = null; pendingDocument = null; documentIds = new String[0]; documentNames = new String[0]; documentExpiry.clear(); documentText.clear(); documentFolders.clear(); selectedFolder = null; searchField.setText(""); renderDocuments(); updateScreen(); status.setText("Хранилище заблокировано."); }
+    @Override protected void onDestroy() { if (previewDialog != null) previewDialog.dismiss(); if (masterKey != null) Arrays.fill(masterKey, (byte) 0); if (pendingDocument != null) Arrays.fill(pendingDocument, (byte) 0); masterKey = null; pendingDocument = null; token = null; executor.shutdownNow(); super.onDestroy(); }
 }

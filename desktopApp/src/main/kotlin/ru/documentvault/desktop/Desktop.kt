@@ -249,7 +249,7 @@ class VaultWindow : JFrame("DocumentVault — локальный прототи�
             } finally { key.fill(0) }
         }) { document ->
             try {
-                val chooser = JFileChooser().apply { selectedFile = java.io.File(document.first) }
+                val chooser = JFileChooser().apply { selectedFile = java.io.File((documentNames[selected] ?: document.first).replace('\\', '/').substringAfterLast('/')) }
                 if (chooser.showSaveDialog(this) == JFileChooser.APPROVE_OPTION) {
                     val target = chooser.selectedFile.toPath()
                     if (!Files.exists(target) || JOptionPane.showConfirmDialog(this, "Заменить существующий файл?", "Подтверждение", JOptionPane.YES_NO_OPTION) == JOptionPane.YES_OPTION) {
@@ -289,7 +289,13 @@ class VaultWindow : JFrame("DocumentVault — локальный прототи�
                 SwingUtilities.invokeLater {
                     runTask("Сохранение зашифрованного текста…", {
                         try {
-                            val bytes = json.writeValueAsBytes(mapOf("name" to name, "text" to text, "expiry" to (expiry?.toString() ?: "")))
+                            val existing = api.metadata(current, id)?.let { encrypted ->
+                                val plain = VaultCrypto.decrypt(saveKey, encrypted, "metadata:$id".toByteArray())
+                                try { json.readTree(plain) } finally { plain.fill(0) }
+                            }
+                            val data = if (existing is com.fasterxml.jackson.databind.node.ObjectNode) existing.deepCopy() else json.createObjectNode()
+                            data.put("name", name); data.put("text", text); data.put("expiry", expiry?.toString() ?: "")
+                            val bytes = json.writeValueAsBytes(data)
                             try { api.saveMetadata(current, id, VaultCrypto.encrypt(saveKey, bytes, "metadata:$id".toByteArray())) } finally { bytes.fill(0) }
                             if (identity != null && System.getProperty("os.name").startsWith("Windows")) runCatching { WindowsReminderStore().put(identity, id, expiry) }.isSuccess else true
                         } finally { saveKey.fill(0) }
@@ -327,7 +333,9 @@ class VaultWindow : JFrame("DocumentVault — локальный прототи�
                     val plain = VaultCrypto.decrypt(key, encrypted, "metadata:$id".toByteArray())
                     try { json.readTree(plain) } finally { plain.fill(0) }
                 }
-                val data = json.writeValueAsBytes(mapOf("name" to (existing?.path("name")?.asText("") ?: ""), "text" to (existing?.path("text")?.asText("") ?: ""), "expiry" to (date?.toString() ?: "")))
+                val updated = if (existing is com.fasterxml.jackson.databind.node.ObjectNode) existing.deepCopy() else json.createObjectNode()
+                updated.put("expiry", date?.toString() ?: "")
+                val data = json.writeValueAsBytes(updated)
                 try { api.saveMetadata(current, id, VaultCrypto.encrypt(key, data, "metadata:$id".toByteArray())) } finally { data.fill(0) }
                 if (identity != null && System.getProperty("os.name").startsWith("Windows")) runCatching { WindowsReminderStore().put(identity, id, date) }.isSuccess else true
             } finally { key.fill(0) }

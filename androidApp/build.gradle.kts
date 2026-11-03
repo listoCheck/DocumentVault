@@ -7,6 +7,7 @@ dependencies {
     implementation("androidx.biometric:biometric:1.1.0")
     implementation("androidx.work:work-runtime:2.12.0")
     implementation("cz.adaptech.tesseract4android:tesseract4android:4.9.0")
+    implementation("org.opencv:opencv:4.10.0")
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
