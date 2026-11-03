@@ -4,12 +4,16 @@ import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
+import android.graphics.Matrix;
 import android.graphics.pdf.PdfRenderer;
+import android.media.ExifInterface;
 import android.os.ParcelFileDescriptor;
 import com.googlecode.tesseract.android.TessBaseAPI;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
 
 /** Local OCR. Temporary PDF copies stay in the app-private cache. */
 public final class LocalOcr {
@@ -20,10 +24,14 @@ public final class LocalOcr {
         BitmapFactory.decodeByteArray(input, 0, input.length, bounds);
         if (bounds.outWidth <= 0 || bounds.outHeight <= 0) throw new IllegalArgumentException("Неподдерживаемое изображение");
         BitmapFactory.Options options = new BitmapFactory.Options();
-        int sample = 1; while (Math.max(bounds.outWidth, bounds.outHeight) / sample > 3000) sample *= 2;
+        int sample = 1; while (((long) Math.max(bounds.outWidth, bounds.outHeight) + sample - 1) / sample > 3000) sample *= 2;
         options.inSampleSize = sample;
-        Bitmap bitmap = BitmapFactory.decodeByteArray(input, 0, input.length, options);
-        if (bitmap == null) throw new IllegalArgumentException("Не удалось открыть изображение");
+        Bitmap decoded = BitmapFactory.decodeByteArray(input, 0, input.length, options);
+        if (decoded == null) throw new IllegalArgumentException("Не удалось открыть изображение");
+        Bitmap bitmap;
+        try { bitmap = orientBitmap(decoded, readOrientation(input)); }
+        catch (Throwable error) { decoded.recycle(); throw error; }
+        if (bitmap != decoded) decoded.recycle();
         TessBaseAPI tess = new TessBaseAPI();
         try {
             if (!tess.init(root.getAbsolutePath(), "rus+eng")) throw new IllegalStateException("Не удалось запустить OCR");
@@ -31,6 +39,29 @@ public final class LocalOcr {
             String result = tess.getUTF8Text();
             return result == null ? "" : result;
         } finally { tess.recycle(); bitmap.recycle(); }
+    }
+
+    private static int readOrientation(byte[] input) {
+        try (ByteArrayInputStream stream = new ByteArrayInputStream(input)) {
+            return new ExifInterface(stream).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL);
+        } catch (IOException error) {
+            return ExifInterface.ORIENTATION_NORMAL;
+        }
+    }
+
+    static Bitmap orientBitmap(Bitmap bitmap, int orientation) {
+        Matrix matrix = new Matrix();
+        switch (orientation) {
+            case ExifInterface.ORIENTATION_FLIP_HORIZONTAL: matrix.setScale(-1, 1); break;
+            case ExifInterface.ORIENTATION_ROTATE_180: matrix.setRotate(180); break;
+            case ExifInterface.ORIENTATION_FLIP_VERTICAL: matrix.setScale(1, -1); break;
+            case ExifInterface.ORIENTATION_TRANSPOSE: matrix.setRotate(90); matrix.postScale(-1, 1); break;
+            case ExifInterface.ORIENTATION_ROTATE_90: matrix.setRotate(90); break;
+            case ExifInterface.ORIENTATION_TRANSVERSE: matrix.setRotate(270); matrix.postScale(-1, 1); break;
+            case ExifInterface.ORIENTATION_ROTATE_270: matrix.setRotate(270); break;
+            default: return bitmap;
+        }
+        return Bitmap.createBitmap(bitmap, 0, 0, bitmap.getWidth(), bitmap.getHeight(), matrix, true);
     }
 
     public static String recognizePdf(Context context, byte[] input) throws Exception {

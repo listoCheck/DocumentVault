@@ -19,6 +19,7 @@ import android.view.View;
 import android.view.Gravity;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -297,7 +298,8 @@ public final class MainActivity extends FragmentActivity {
             renderDocuments(); updateScreen(); status.setText("Вы вышли из аккаунта.");
         });
     }
-    private void refresh() {
+    private void refresh() { refresh(null); }
+    private void refresh(String completionMessage) {
         if (token == null) { status.setText("Сначала войдите в аккаунт."); return; }
         VaultApi selectedApi = api; String selectedToken = token; byte[] key = masterKey == null ? null : masterKey.clone(); String identity = accountIdentity;
         runTask("Обновляем документы…", () -> {
@@ -327,7 +329,8 @@ public final class MainActivity extends FragmentActivity {
             } finally { if (key != null) Arrays.fill(key, (byte) 0); }
         }, listing -> {
             documentIds = listing.ids; documentNames = listing.names; documentExpiry.clear(); documentExpiry.putAll(listing.dates); documentText.clear(); documentText.putAll(listing.texts); renderDocuments();
-            status.setText(listing.reminderError ? "Документы загружены, но напоминания не обновлены." : "Документы обновлены.");
+            String resultMessage = completionMessage == null ? "Документы обновлены." : completionMessage;
+            status.setText(listing.reminderError ? resultMessage + " Напоминания не обновлены." : resultMessage);
             if (!listing.reminderError && !listing.dates.isEmpty()) enableReminders();
         });
     }
@@ -357,7 +360,7 @@ public final class MainActivity extends FragmentActivity {
                         catch (Exception e) { return "Срок сохранён, но напоминание не настроено."; }
                         return "Срок сохранён.";
                     } finally { Arrays.fill(key, (byte) 0); if (plain != null) Arrays.fill(plain, (byte) 0); if (updated != null) Arrays.fill(updated, (byte) 0); }
-                }, message -> { status.setText(message); if (!expiry.isEmpty() && !message.contains("не настроено")) enableReminders(); refresh(); });
+                }, message -> { if (!expiry.isEmpty() && !message.contains("не настроено")) enableReminders(); refresh(message); });
             }).show();
     }
     private void enableReminders() {
@@ -494,7 +497,7 @@ public final class MainActivity extends FragmentActivity {
                 selectedApi.upload(selectedToken, id, VaultCrypto.encrypt(key, payload, "document:" + id));
                 byte[] metadata = new JSONObject().put("name", name).put("text", "").put("expiry", "").toString().getBytes(StandardCharsets.UTF_8);
                 try { selectedApi.saveMetadata(selectedToken, id, VaultCrypto.encrypt(key, metadata, "metadata:" + id)); }
-                catch (Exception ignored) { return new UploadResult(id, name, null, "Документ загружен. Сохранить название не удалось."); }
+                catch (Exception error) { return new UploadResult(id, name, null, error instanceof VaultApi.HttpFailure && ((VaultApi.HttpFailure) error).status == 413 ? "Документ загружен, но для названия нет места в хранилище." : "Документ загружен. Сохранить название не удалось."); }
                 finally { Arrays.fill(metadata, (byte) 0); }
                 String mime = getContentResolver().getType(uri);
                 boolean isPdf = (mime != null && mime.equals("application/pdf")) || name.toLowerCase(java.util.Locale.ROOT).endsWith(".pdf");
@@ -503,22 +506,40 @@ public final class MainActivity extends FragmentActivity {
             } finally { Arrays.fill(key, (byte) 0); if (file != null) Arrays.fill(file, (byte) 0); if (payload != null) Arrays.fill(payload, (byte) 0); if (temporaryCapture != null) temporaryCapture.delete(); }
         }, result -> {
             status.setText(result.message);
-            if (result.text != null) confirmOcr(result); else refresh();
+            if (result.text != null) confirmOcr(result); else refresh(result.message);
         });
     }
     private static final class UploadResult {
         final String id, name, text, message;
         UploadResult(String id, String name, String text, String message) { this.id = id; this.name = name; this.text = text; this.message = message; }
     }
-    private void confirmOcr(UploadResult result) {
+    private AlertDialog confirmOcr(UploadResult result) {
         LinearLayout content = new LinearLayout(this); content.setOrientation(LinearLayout.VERTICAL); content.setPadding(24, 12, 24, 12);
         java.util.List<java.time.LocalDate> dates = DateSuggestions.find(result.text);
-        TextView label = new TextView(this); label.setText("Найденные даты: " + dates + "\nУкажите срок действия вручную в формате ГГГГ-ММ-ДД или оставьте поле пустым."); content.addView(label);
+        TextView label = new TextView(this); label.setText("Выберите срок из найденных дат или укажите его вручную в формате ГГГГ-ММ-ДД. Если срока нет, оставьте поле пустым."); content.addView(label);
         EditText expiry = new EditText(this); expiry.setHint("ГГГГ-ММ-ДД"); expiry.setSingleLine(true); content.addView(expiry);
+        if (!dates.isEmpty()) {
+            HorizontalScrollView dateScroll = new HorizontalScrollView(this);
+            LinearLayout choices = new LinearLayout(this); choices.setOrientation(LinearLayout.HORIZONTAL);
+            for (int i = 0; i < Math.min(dates.size(), 12); i++) {
+                String value = dates.get(i).toString(); Button choice = new Button(this); choice.setText(value);
+                choice.setOnClickListener(view -> expiry.setText(value)); choices.addView(choice);
+            }
+            dateScroll.addView(choices); content.addView(dateScroll);
+            if (dates.size() > 12) { TextView more = new TextView(this); more.setText("Показаны первые 12 дат. Другую дату можно ввести вручную."); content.addView(more); }
+        }
         TextView text = new TextView(this); text.setText(result.text); ScrollView scroll = new ScrollView(this); scroll.addView(text); content.addView(scroll, new LinearLayout.LayoutParams(-1, 400));
-        new AlertDialog.Builder(this).setTitle("Проверьте результат OCR").setView(content)
-            .setNegativeButton("Не сохранять", (dialog, which) -> { status.setText("Текст OCR не сохранён."); refresh(); })
-            .setPositiveButton("Сохранить", (dialog, which) -> saveOcr(result, expiry.getText().toString().trim())).show();
+        AlertDialog dialog = new AlertDialog.Builder(this).setTitle("Проверьте результат OCR").setView(content)
+            .setNegativeButton("Не сохранять", (ignoredDialog, which) -> refresh("Текст OCR не сохранён."))
+            .setPositiveButton("Сохранить", null).create();
+        dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
+            String value = expiry.getText().toString().trim();
+            if (!value.isEmpty()) try { java.time.LocalDate.parse(value); }
+            catch (java.time.DateTimeException error) { expiry.setError("Укажите дату в формате ГГГГ-ММ-ДД"); return; }
+            dialog.dismiss(); saveOcr(result, value);
+        }));
+        dialog.show();
+        return dialog;
     }
     private void saveOcr(UploadResult result, String expiry) {
         if (masterKey == null || token == null) { status.setText("Хранилище заблокировано."); return; }
@@ -533,7 +554,7 @@ public final class MainActivity extends FragmentActivity {
                     catch (Exception e) { return "Данные сохранены, но напоминание не настроено."; }
                 return "Распознанный текст и срок сохранены в зашифрованном виде.";
             } finally { Arrays.fill(key, (byte) 0); if (bytes != null) Arrays.fill(bytes, (byte) 0); }
-        }, message -> { status.setText(message); if (!expiry.isEmpty() && !message.contains("не настроено")) enableReminders(); refresh(); });
+        }, message -> { if (!expiry.isEmpty() && !message.contains("не настроено")) enableReminders(); refresh(message); });
     }
     private void chooseDocument() {
         if (token == null || masterKey == null) { status.setText("Войдите и разблокируйте хранилище."); return; }

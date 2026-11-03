@@ -6,11 +6,13 @@ import io.javalin.Javalin
 import io.javalin.http.BadRequestResponse
 import io.javalin.http.ConflictResponse
 import io.javalin.http.Context
+import io.javalin.http.ContentTooLargeResponse
 import io.javalin.http.NotFoundResponse
 import io.javalin.http.UnauthorizedResponse
 import io.javalin.http.TooManyRequestsResponse
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder
 import java.nio.file.Path
+import java.net.InetAddress
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.sql.Connection
@@ -28,15 +30,17 @@ private val passwordEncoder = BCryptPasswordEncoder(12)
 private val placeholderPasswordHash = passwordEncoder.encode("not-a-real-password")
 
 /** Local development server; deploy only after adding HTTPS and operational safeguards. */
-class VaultServer(database: Path) {
+class VaultServer(database: Path, private val maxDocuments: Int = 1_000, private val maxStorageBytes: Long = 256L * 1024 * 1024, private val trustLoopbackProxy: Boolean = false) {
     private val jdbcUrl = "jdbc:sqlite:${database.toAbsolutePath()}"
     private val loginLimiter = LoginLimiter()
+    private val registrationLimiter = LoginLimiter(maxAttempts = 10, windowSeconds = 3600)
 
     init {
         connection().use { db ->
             db.createStatement().use { sql ->
                 sql.executeUpdate("CREATE TABLE IF NOT EXISTS accounts (id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, recovery_salt BLOB NOT NULL, wrapped_key BLOB NOT NULL)")
                 sql.executeUpdate("CREATE TABLE IF NOT EXISTS sessions (token_hash BLOB PRIMARY KEY, account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, expires_at INTEGER NOT NULL)")
+                sql.executeUpdate("CREATE INDEX IF NOT EXISTS sessions_expiry ON sessions(expires_at)")
                 sql.executeUpdate("CREATE TABLE IF NOT EXISTS documents (id TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, ciphertext BLOB NOT NULL, created_at INTEGER NOT NULL)")
                 sql.executeUpdate("CREATE TABLE IF NOT EXISTS document_metadata (document_id TEXT PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE, ciphertext BLOB NOT NULL)")
             }
@@ -47,6 +51,31 @@ class VaultServer(database: Path) {
         it.createStatement().use { statement ->
             statement.execute("PRAGMA foreign_keys = ON")
             statement.execute("PRAGMA busy_timeout = 5000")
+        }
+    }
+
+    // Serialize quota checks and writes across connections and server processes sharing this database.
+    private fun <T> quotaWrite(user: String, write: (Connection) -> T): T = connection().use { db ->
+        db.createStatement().use { it.execute("BEGIN IMMEDIATE") }
+        try {
+            val result = write(db)
+            db.prepareStatement("""
+                SELECT COUNT(*), COALESCE(SUM(LENGTH(d.ciphertext) + COALESCE(LENGTH(m.ciphertext), 0)), 0)
+                FROM documents d LEFT JOIN document_metadata m ON m.document_id = d.id WHERE d.account_id = ?
+            """.trimIndent()).use { statement ->
+                statement.setString(1, user)
+                statement.executeQuery().use { row ->
+                    row.next()
+                    if (row.getLong(1) > maxDocuments || row.getLong(2) > maxStorageBytes) {
+                        throw ContentTooLargeResponse("Account storage quota exceeded")
+                    }
+                }
+            }
+            db.createStatement().use { it.execute("COMMIT") }
+            result
+        } catch (error: Throwable) {
+            try { db.createStatement().use { it.execute("ROLLBACK") } } catch (rollbackError: Exception) { error.addSuppressed(rollbackError) }
+            throw error
         }
     }
 
@@ -93,6 +122,7 @@ class VaultServer(database: Path) {
     }
 
     private fun register(ctx: Context) {
+        if (!registrationLimiter.allow(limiterAddress(ctx.ip(), ctx.header("X-Real-IP"), trustLoopbackProxy))) throw TooManyRequestsResponse("Too many registration attempts; try again later")
         val body = readJson(ctx)
         val username = validateUsername(field(body, "username", 40))
         val password = field(body, "password", 72).also(::validatePassword)
@@ -114,7 +144,7 @@ class VaultServer(database: Path) {
     }
 
     private fun login(ctx: Context) {
-        if (!loginLimiter.allow(ctx.ip())) throw TooManyRequestsResponse("Too many login attempts; try again later")
+        if (!loginLimiter.allow(limiterAddress(ctx.ip(), ctx.header("X-Real-IP"), trustLoopbackProxy))) throw TooManyRequestsResponse("Too many login attempts; try again later")
         val body = readJson(ctx)
         val username = validateUsername(field(body, "username", 40))
         val password = field(body, "password", 72)
@@ -127,10 +157,13 @@ class VaultServer(database: Path) {
         }
         val matches = passwordEncoder.matches(password, account?.second ?: placeholderPasswordHash)
         if (account == null || !matches) throw UnauthorizedResponse("Invalid credentials")
-        loginLimiter.clear(ctx.ip())
         val token = ByteArray(32).also(random::nextBytes)
-        val expires = Instant.now().epochSecond + 24 * 60 * 60
+        val now = Instant.now().epochSecond
+        val expires = now + 24 * 60 * 60
         connection().use { db ->
+            db.prepareStatement("DELETE FROM sessions WHERE expires_at <= ?").use { s ->
+                s.setLong(1, now); s.executeUpdate()
+            }
             db.prepareStatement("INSERT INTO sessions (token_hash, account_id, expires_at) VALUES (?, ?, ?)").use { s ->
                 s.setBytes(1, sha256(token)); s.setString(2, account.first); s.setLong(3, expires); s.executeUpdate()
             }
@@ -187,7 +220,7 @@ class VaultServer(database: Path) {
         val id = try { UUID.fromString(ctx.header("X-Document-Id")).toString() } catch (_: Exception) { throw BadRequestResponse("A UUID X-Document-Id is required") }
         val data = ctx.bodyAsBytes()
         if (data.size < 29 || data.size.toLong() > MAX_BODY || data[0] != 1.toByte()) throw BadRequestResponse("Invalid encrypted envelope")
-        connection().use { db ->
+        quotaWrite(user) { db ->
             try { db.prepareStatement("INSERT INTO documents (id, account_id, ciphertext, created_at) VALUES (?, ?, ?, ?)").use { s ->
                 s.setString(1, id); s.setString(2, user); s.setBytes(3, data); s.setLong(4, Instant.now().epochSecond); s.executeUpdate()
             } } catch (e: java.sql.SQLException) { if (e.errorCode == 19) throw ConflictResponse("Document already exists") else throw e }
@@ -227,7 +260,7 @@ class VaultServer(database: Path) {
         val id = ctx.pathParam("id")
         val data = ctx.bodyAsBytes()
         if (data.size !in 29..(1024 * 1024) || data[0] != 1.toByte()) throw BadRequestResponse("Invalid encrypted metadata")
-        connection().use { db -> db.prepareStatement("INSERT INTO document_metadata (document_id, ciphertext) SELECT id, ? FROM documents WHERE id = ? AND account_id = ? ON CONFLICT(document_id) DO UPDATE SET ciphertext=excluded.ciphertext").use { s ->
+        quotaWrite(user) { db -> db.prepareStatement("INSERT INTO document_metadata (document_id, ciphertext) SELECT id, ? FROM documents WHERE id = ? AND account_id = ? ON CONFLICT(document_id) DO UPDATE SET ciphertext=excluded.ciphertext").use { s ->
             s.setBytes(1, data); s.setString(2, id); s.setString(3, user)
             if (s.executeUpdate() == 0) throw NotFoundResponse("Document not found")
         } }
@@ -240,8 +273,19 @@ fun main() {
     val port = System.getenv("VAULT_PORT")?.toInt() ?: 7070
     // The default is local-only. Container deployments can bind to an isolated network behind TLS.
     val host = System.getenv("VAULT_BIND") ?: "127.0.0.1"
-    val app = VaultServer(database).app()
+    val trustLoopbackProxy = System.getenv("VAULT_TRUST_LOOPBACK_PROXY") == "true"
+    require(!trustLoopbackProxy || host in setOf("127.0.0.1", "::1")) { "Trusted proxy mode requires a loopback bind" }
+    val app = VaultServer(database, trustLoopbackProxy = trustLoopbackProxy).app()
     app.start(host, port)
+}
+
+/** Only a proxy on the same host may supply one numeric client address. */
+internal fun limiterAddress(peer: String, forwarded: String?, trustLoopbackProxy: Boolean): String {
+    if (!trustLoopbackProxy || peer !in setOf("127.0.0.1", "::1", "0:0:0:0:0:0:0:1") || forwarded == null || forwarded.length > 45) return peer
+    val ipv4 = forwarded.matches(Regex("\\d{1,3}(?:\\.\\d{1,3}){3}"))
+    val ipv6 = ':' in forwarded && forwarded.matches(Regex("[0-9a-fA-F:.]+"))
+    if (!ipv4 && !ipv6) return peer
+    return try { InetAddress.getByName(forwarded).hostAddress } catch (_: java.net.UnknownHostException) { peer }
 }
 
 /** Per-process IP limit. A public deployment also needs an edge rate limiter. */
@@ -255,5 +299,4 @@ internal class LoginLimiter(private val maxAttempts: Int = 5, private val window
         while (entries.size > maxEntries) entries.remove(entries.entries.first().key)
         return true
     }
-    @Synchronized fun clear(ip: String) { entries.remove(ip) }
 }

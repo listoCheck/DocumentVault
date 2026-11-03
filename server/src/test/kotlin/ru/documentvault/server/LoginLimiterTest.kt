@@ -12,7 +12,6 @@ class LoginLimiterTest {
         assertFalse(limiter.allow("first", 102))
         assertTrue(limiter.allow("second", 102))
         assertTrue(limiter.allow("first", 160))
-        limiter.clear("first")
         assertTrue(limiter.allow("first", 161))
     }
 }

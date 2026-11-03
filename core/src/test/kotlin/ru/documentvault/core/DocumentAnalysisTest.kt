@@ -22,6 +22,11 @@ class DocumentAnalysisTest {
         assertFalse(OcrSearch.matches("договор", "паспорт"))
         assertFalse(OcrSearch.matches("договор", ""))
     }
+    @Test fun `extracts ISO dates alongside local formats and ignores invalid dates`() {
+        val result = DocumentDates.find("Истекает 2030-12-31\nВыдан 01.02.2020\nДействителен до 29 ФЕВРАЛЯ 2024\n2023-02-29\n31 апреля 2030")
+        assertEquals(listOf(LocalDate.of(2030, 12, 31), LocalDate.of(2020, 2, 1), LocalDate.of(2024, 2, 29)), result.map { it.date })
+        assertTrue(result.first().likelyExpiry)
+    }
     @Test fun `expiry window includes today and the thirtieth day`() {
         val today = LocalDate.of(2030, 1, 1)
         assertTrue(DocumentDates.dueWithin(today, today))

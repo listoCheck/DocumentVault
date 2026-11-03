@@ -24,7 +24,11 @@ private val json = ObjectMapper()
 private val b64 = Base64.getEncoder()
 private val b64decode = Base64.getDecoder()
 
-class ApiException(val status: Int) : RuntimeException("Ошибка сервера: HTTP $status")
+class ApiException(val status: Int) : RuntimeException(when (status) {
+    413 -> "Превышен размер файла или лимит хранилища."
+    429 -> "Слишком много попыток. Подождите и повторите."
+    else -> "Ошибка сервера: HTTP $status"
+})
 
 class VaultApi(private val root: String = ROOT) {
     init {

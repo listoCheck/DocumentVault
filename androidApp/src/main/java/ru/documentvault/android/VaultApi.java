@@ -13,7 +13,7 @@ import java.util.Base64;
 public final class VaultApi {
     public static final class HttpFailure extends Exception {
         public final int status;
-        HttpFailure(int status) { super("Ошибка сервера: HTTP " + status); this.status = status; }
+        HttpFailure(int status) { super(status == 413 ? "Превышен размер файла или лимит хранилища." : status == 429 ? "Слишком много попыток. Подождите и повторите." : "Ошибка сервера: HTTP " + status); this.status = status; }
     }
     private final String root;
     public VaultApi(String root) {
