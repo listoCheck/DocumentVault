@@ -7,6 +7,7 @@ import com.drew.metadata.exif.ExifIFD0Directory
 import org.apache.pdfbox.Loader
 import org.apache.pdfbox.rendering.ImageType
 import org.apache.pdfbox.rendering.PDFRenderer
+import org.apache.pdfbox.text.PDFTextStripper
 import java.io.ByteArrayInputStream
 import java.io.IOException
 import java.awt.geom.AffineTransform
@@ -17,7 +18,9 @@ import javax.imageio.ImageIO
 import javax.imageio.stream.MemoryCacheImageInputStream
 
 object LocalOcr {
-    fun recognize(name: String, data: ByteArray): String {
+    data class Result(val text: String, val layout: com.fasterxml.jackson.databind.node.ObjectNode?)
+    fun recognize(name: String, data: ByteArray): String = recognizeDetailed(name, data).text
+    fun recognizeDetailed(name: String, data: ByteArray): Result {
         val tessdata = (System.getenv("VAULT_TESSDATA")?.let { Path.of(it) }
             ?: listOf(Path.of("tessdata"), Path.of("..", "tessdata")).firstOrNull { Files.exists(it.resolve("rus.traineddata")) })
             ?: error("Не найдены языковые модели tessdata. Укажите VAULT_TESSDATA.")
@@ -27,19 +30,65 @@ object LocalOcr {
             Loader.loadPDF(data).use { pdf ->
                 require(pdf.numberOfPages in 1..20) { "Поддерживаются PDF не более 20 страниц." }
                 val renderer = PDFRenderer(pdf)
-                return (0 until pdf.numberOfPages).joinToString("\n") { page ->
-                    val box = pdf.getPage(page).cropBox
-                    val image = renderer.renderImage(page, pdfScale(box.width, box.height), ImageType.RGB)
-                    try { tesseract.doOCR(image) } finally { image.flush() }
+                val stripper = PDFTextStripper().apply { sortByPosition = true }
+                val text = (0 until pdf.numberOfPages).joinToString("\n") { page ->
+                    stripper.startPage = page + 1; stripper.endPage = page + 1
+                    val embedded = stripper.getText(pdf).trim()
+                    val resources = pdf.getPage(page).resources
+                    // XObjects may contain scanned content, including images inside forms.
+                    val hasExternalContent = resources != null && resources.xObjectNames.iterator().hasNext()
+                    if (embedded.any(Char::isLetterOrDigit) && !hasExternalContent) embedded else {
+                        val box = pdf.getPage(page).cropBox
+                        val image = renderer.renderImage(page, pdfScale(box.width, box.height), ImageType.RGB)
+                        try { tesseract.doOCR(image) } finally { image.flush() }
+                    }
                 }
+                return Result(text, null)
             }
         }
         val image = decodeImage(data)
         var oriented: BufferedImage? = null
         return try {
             oriented = orientImage(image, readOrientation(data))
-            tesseract.doOCR(oriented)
+            val json = com.fasterxml.jackson.databind.ObjectMapper(); val words = json.createArrayNode()
+            val detected = mutableListOf<DetectedWord>()
+            for (mode in listOf(3, 11)) {
+                tesseract.setPageSegMode(mode)
+                for (word in tesseract.getWords(oriented, net.sourceforge.tess4j.ITessAPI.TessPageIteratorLevel.RIL_WORD)) {
+                    val value = word.text?.trim().orEmpty(); val box = word.boundingBox ?: continue
+                    if (value.isEmpty() || box.width <= 0 || box.height <= 0 || box.x < 0 || box.y < 0 || box.x + box.width > oriented.width || box.y + box.height > oriented.height) continue
+                    val candidate = DetectedWord(value, box, word.confidence)
+                    val duplicate = detected.indexOfFirst { overlaps(it.box, box) }
+                    if (duplicate < 0 && detected.size < 3000) detected.add(candidate)
+                    else if (duplicate >= 0 && word.confidence > detected[duplicate].confidence + 5) detected[duplicate] = candidate
+                }
+            }
+            val lines = mutableListOf<MutableList<DetectedWord>>()
+            for (word in detected.sortedBy { it.box.centerY }) {
+                val line = lines.firstOrNull { group -> group.any { item -> kotlin.math.abs(item.box.centerY - word.box.centerY) <= maxOf(item.box.height, word.box.height) * 0.55 } }
+                if (line == null) lines.add(mutableListOf(word)) else line.add(word)
+            }
+            val text = lines.joinToString("\n") { line ->
+                line.sortBy { it.box.x }
+                line.mapNotNull { word ->
+                    val textWord = word.value.takeIf { word.confidence >= 15 || it.any(Char::isDigit) }.orEmpty()
+                    val box = word.box
+                    words.add(json.createArrayNode().add(textWord).add(box.x.toDouble() / oriented.width).add(box.y.toDouble() / oriented.height)
+                        .add((box.x + box.width).toDouble() / oriented.width).add((box.y + box.height).toDouble() / oriented.height))
+                    textWord.takeIf(String::isNotEmpty)
+                }.joinToString(" ")
+            }.trim()
+            val layout = json.createObjectNode().put("version", 1); layout.set<com.fasterxml.jackson.databind.JsonNode>("words", words)
+            Result(text, layout)
         } finally { if (oriented !== image) oriented?.flush(); image.flush() }
+    }
+
+    private data class DetectedWord(val value: String, val box: java.awt.Rectangle, val confidence: Float)
+    private fun overlaps(a: java.awt.Rectangle, b: java.awt.Rectangle): Boolean {
+        val intersection = a.intersection(b)
+        if (intersection.isEmpty) return false
+        val area = intersection.width.toDouble() * intersection.height
+        return area / minOf(a.width.toDouble() * a.height, b.width.toDouble() * b.height) >= 0.6
     }
 
     internal fun pdfScale(width: Float, height: Float): Float {

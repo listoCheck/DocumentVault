@@ -75,5 +75,6 @@ public final class VaultApi {
         catch (HttpFailure e) { if (e.status == 404) return null; throw e; }
     }
     public void saveMetadata(String token, String id, byte[] ciphertext) throws Exception { request("PUT", "/v1/documents/" + id + "/metadata", ciphertext, token, null, false); }
+    public void delete(String token, String id) throws Exception { request("DELETE", "/v1/documents/" + id, null, token, null, false); }
     public void logout(String token) throws Exception { request("DELETE", "/v1/sessions/current", null, token, null, false); }
 }

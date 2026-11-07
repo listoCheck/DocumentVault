@@ -159,7 +159,7 @@ class VaultServer(database: Path, private val maxDocuments: Int = 1_000, private
         if (account == null || !matches) throw UnauthorizedResponse("Invalid credentials")
         val token = ByteArray(32).also(random::nextBytes)
         val now = Instant.now().epochSecond
-        val expires = now + 24 * 60 * 60
+        val expires = now + 30L * 24 * 60 * 60
         connection().use { db ->
             db.prepareStatement("DELETE FROM sessions WHERE expires_at <= ?").use { s ->
                 s.setLong(1, now); s.executeUpdate()

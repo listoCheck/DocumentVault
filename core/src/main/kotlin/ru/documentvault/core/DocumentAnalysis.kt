@@ -12,7 +12,7 @@ object DocumentDates {
     private val months = listOf("января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря")
     private val expiry = Regex("(?iu)(действителен|действительна|действительно|действует|срок действия|годен|истекает|expiry|expiration|valid until|expires)")
 
-    /** Candidates are suggestions only; the user must confirm the document's actual expiry. */
+    /** Extract date candidates with their surrounding text. */
     fun find(text: String): List<DateCandidate> = numeric.findAll(text).mapNotNull { match ->
         try {
             val iso = match.groupValues[1].isNotEmpty()
@@ -25,6 +25,23 @@ object DocumentDates {
             DateCandidate(date, line.take(200), expiry.containsMatchIn(line))
         } catch (_: DateTimeException) { null }
     }.distinctBy { it.date to it.excerpt }.toList()
+
+    fun automaticExpiry(text: String): LocalDate? {
+        val label = Regex("(?iu)(?:действителен|действительна|действительно|действует|срок\\s+действия|годен|годна|истекает|дата\\s+окончания|expiry|expiration|valid\\s+(?:until|through|to)|expires)")
+        val until = Regex("(?iu)(?:(?<![\\p{L}])до(?![\\p{L}])|(?<![\\p{L}])по(?![\\p{L}])|until|through|expires?\\s+on)")
+        val cutoff = Regex("(?iu)(?:выдан|выдана|дата\\s+рождения|issued|birth)")
+        val candidates = mutableSetOf<LocalDate>()
+        for (line in text.lineSequence()) for (match in label.findAll(line)) {
+            var tail = line.substring(match.range.last + 1).take(120).split(cutoff, limit = 2).first()
+            val endMarker = until.find(tail)
+            if (endMarker != null) tail = tail.substring(endMarker.range.last + 1)
+            else if (Regex("(?iu)(действу|действител|годен|годна)").containsMatchIn(match.value)) continue
+            val dates = find(tail).map { it.date }.distinct()
+            if (dates.size > 1) return null
+            if (dates.size == 1) candidates.add(dates.first())
+        }
+        return candidates.singleOrNull()
+    }
 
     fun dueWithin(date: LocalDate, today: LocalDate, days: Long = 30): Boolean {
         require(days >= 0)

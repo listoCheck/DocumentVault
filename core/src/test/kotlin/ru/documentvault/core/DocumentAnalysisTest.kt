@@ -34,4 +34,10 @@ class DocumentAnalysisTest {
         assertFalse(DocumentDates.dueWithin(today.plusDays(31), today))
         assertFalse(DocumentDates.dueWithin(today.minusDays(1), today))
     }
+    @Test fun `automatically select clear expiry and reject unrelated dates`() {
+        assertEquals(LocalDate.of(2030, 12, 31), DocumentDates.automaticExpiry("Выдан 01.01.2020\nДействует до 31.12.2030"))
+        assertEquals(LocalDate.of(2030, 12, 31), DocumentDates.automaticExpiry("Срок действия с 01.01.2020 по 31.12.2030"))
+        assertEquals(null, DocumentDates.automaticExpiry("Выдан 01.01.2020\nДата рождения 31.12.2030"))
+        assertEquals(null, DocumentDates.automaticExpiry("Срок действия: 31.12.2030 и 31.12.2031"))
+    }
 }

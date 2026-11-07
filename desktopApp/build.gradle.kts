@@ -1,7 +1,9 @@
-plugins { kotlin("jvm"); application }
+plugins { kotlin("jvm"); application; id("org.openjfx.javafxplugin") version "0.1.0" }
 
 kotlin { jvmToolchain(21) }
-application { mainClass.set("ru.documentvault.desktop.DesktopKt") }
+application { mainClass.set("ru.documentvault.desktop.FxLauncherKt") }
+
+javafx { version = "21.0.6"; modules = listOf("javafx.controls") }
 
 dependencies {
     implementation(project(":core"))

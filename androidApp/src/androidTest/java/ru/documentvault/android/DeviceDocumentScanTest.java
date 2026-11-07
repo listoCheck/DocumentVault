@@ -52,6 +52,14 @@ public final class DeviceDocumentScanTest {
         assertEquals("DOCUMENT", corrected.getJSONArray("words").getJSONArray(0).getString(0));
         assertNull(OcrOverlay.correctedLayout(layout.toString(), "DOCUMENT"));
     }
+    @Test public void correctedTextKeepsUncertainMaskRegions() throws Exception {
+        JSONObject layout = new JSONObject().put("version", 1).put("words", new JSONArray()
+            .put(new JSONArray().put("WORD").put(0.1).put(0.1).put(0.4).put(0.2))
+            .put(new JSONArray().put("").put(0.5).put(0.1).put(0.7).put(0.2)));
+        JSONObject corrected = new JSONObject(OcrOverlay.correctedLayout(layout.toString(), "TEXT"));
+        assertEquals("TEXT", corrected.getJSONArray("words").getJSONArray(0).getString(0));
+        assertEquals("", corrected.getJSONArray("words").getJSONArray(1).getString(0));
+    }
     @Test public void overlayUsesOpaqueGrayAndKeepsTextInsideItsBox() throws Exception {
         Bitmap source = Bitmap.createBitmap(200, 100, Bitmap.Config.ARGB_8888); source.eraseColor(Color.RED);
         JSONObject layout = new JSONObject().put("version", 1).put("words", new JSONArray()
@@ -64,7 +72,7 @@ public final class DeviceDocumentScanTest {
             boolean dark = false;
             for (int y = 50; y < 90 && !dark; y++) for (int x = 100; x < 180; x++) if (Color.red(rendered.getPixel(x, y)) < 40) { dark = true; break; }
             assertTrue("Fitted OCR text should be visible", dark);
-            assertEquals(Color.RED, rendered.getPixel(181, 91));
+            assertEquals(Color.RED, rendered.getPixel(185, 95));
         } finally { rendered.recycle(); source.recycle(); }
     }
 }

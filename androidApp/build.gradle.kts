@@ -17,7 +17,7 @@ android {
     namespace = "ru.documentvault.android"
     compileSdk = 36
     defaultConfig {
-        applicationId = "ru.documentvault.android"
+        applicationId = if (providers.gradleProperty("isolatedDeviceTest").orNull == "true") "ru.documentvault.android.testing" else "ru.documentvault.android"
         minSdk = 26
         targetSdk = 36
         versionCode = 1

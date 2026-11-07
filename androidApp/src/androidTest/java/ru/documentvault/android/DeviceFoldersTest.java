@@ -28,6 +28,11 @@ public final class DeviceFoldersTest {
         String password = "test-login-password", recovery = "recovery-password-123";
         VaultApi api = new VaultApi(root); api.register(user, password, recovery.toCharArray()); String token = api.login(user, password);
         byte[] key = api.unlock(token, recovery.toCharArray()); String id = UUID.randomUUID().toString();
+        String folderId = UUID.randomUUID().toString(); byte[] folderName = "folder".getBytes(StandardCharsets.UTF_8);
+        byte[] folderPayload = ByteBuffer.allocate(4 + folderName.length).putInt(folderName.length).put(folderName).array();
+        api.upload(token, folderId, VaultCrypto.encrypt(key, folderPayload, "document:" + folderId));
+        byte[] folderMetadata = new JSONObject().put("recordType", "documentvault.folder.v1").put("folder", "Пустая").toString().getBytes(StandardCharsets.UTF_8);
+        api.saveMetadata(token, folderId, VaultCrypto.encrypt(key, folderMetadata, "metadata:" + folderId));
         Bitmap bitmap = Bitmap.createBitmap(1400, 350, Bitmap.Config.ARGB_8888); bitmap.eraseColor(android.graphics.Color.WHITE);
         android.graphics.Canvas canvas = new android.graphics.Canvas(bitmap); android.graphics.Paint paint = new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG); paint.setColor(android.graphics.Color.BLACK); paint.setTextSize(100); canvas.drawText("DOCUMENT 2030", 40, 180, paint);
         ByteArrayOutputStream stream = new ByteArrayOutputStream(); assertTrue(bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)); bitmap.recycle();
@@ -53,6 +58,8 @@ public final class DeviceFoldersTest {
                 DeviceUiTest.findByText(activity.getWindow().getDecorView(), "Разблокировать").performClick();
             });
             DeviceUiTest.waitFor(runner, activity, "Пример.png");
+            DeviceUiTest.waitFor(runner, activity, "Пустая");
+            runner.runOnMainSync(() -> assertNull("Encrypted folder records must not be shown as files", DeviceUiTest.findByText(activity.getWindow().getDecorView(), folderId)));
             runner.runOnMainSync(() -> {
                 assertNotNull(DeviceUiTest.findByText(activity.getWindow().getDecorView(), "Работа"));
                 DeviceUiTest.findByText(activity.getWindow().getDecorView(), "Без папки").performClick();

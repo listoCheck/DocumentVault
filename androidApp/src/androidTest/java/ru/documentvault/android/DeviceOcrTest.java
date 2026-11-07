@@ -38,6 +38,35 @@ public final class DeviceOcrTest {
         assertTrue("English text missing from OCR result: " + text, text.contains("DOCUMENT"));
         assertTrue("Russian text missing from OCR result: " + text, text.contains("ДОКУМЕНТ"));
     }
+    @Test public void recognizesTextAndExpiryOnUnevenBackground() throws Exception {
+        Bitmap bitmap = Bitmap.createBitmap(1800, 600, Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(bitmap); Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        paint.setShader(new android.graphics.LinearGradient(0, 0, 1800, 0, Color.rgb(170, 170, 170), Color.WHITE, android.graphics.Shader.TileMode.CLAMP));
+        canvas.drawRect(0, 0, 1800, 600, paint); paint.setShader(null); paint.setColor(Color.BLACK);
+        paint.setTypeface(Typeface.create("sans-serif", Typeface.BOLD)); paint.setTextSize(85);
+        canvas.drawText("ДЕЙСТВУЕТ ДО 31.12.2030", 50, 240, paint);
+        canvas.drawText("DOCUMENT 2030", 50, 400, paint);
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        assertTrue(bitmap.compress(Bitmap.CompressFormat.PNG, 100, buffer)); bitmap.recycle();
+        String result = LocalOcr.recognizeImage(InstrumentationRegistry.getInstrumentation().getTargetContext(), buffer.toByteArray(), false).text;
+        assertTrue("Missing English: " + result, result.toUpperCase(Locale.ROOT).contains("DOCUMENT"));
+        assertEquals("Expiry not found: " + result, java.time.LocalDate.of(2030, 12, 31), DateSuggestions.findExpiry(result));
+    }
+    @Test public void recognizesSparseFormFromTopToBottom() throws Exception {
+        Bitmap image = Bitmap.createBitmap(1600, 1200, Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(image); canvas.drawColor(Color.rgb(230, 228, 220));
+        Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG); paint.setColor(Color.BLACK); paint.setTypeface(Typeface.create("sans-serif", Typeface.BOLD)); paint.setTextSize(65);
+        canvas.drawText("DOCUMENT 2030", 70, 150, paint); canvas.drawText("ВОПРОС", 70, 570, paint); canvas.drawText("МЕТОДИКА", 70, 1070, paint);
+        ByteArrayOutputStream output = new ByteArrayOutputStream(); assertTrue(image.compress(Bitmap.CompressFormat.PNG, 100, output)); image.recycle();
+        LocalOcr.ImageResult result = LocalOcr.recognizeImage(InstrumentationRegistry.getInstrumentation().getTargetContext(), output.toByteArray(), false);
+        String text = result.text.toUpperCase(Locale.ROOT);
+        assertTrue("Missing top text: " + text, text.contains("DOCUMENT"));
+        assertTrue("Missing middle text: " + text, text.contains("ВОПРОС"));
+        assertTrue("Missing bottom text: " + text, text.contains("МЕТОДИКА"));
+        org.json.JSONArray words = result.layout.getJSONArray("words"); boolean lowerWord = false;
+        for (int i = 0; i < words.length(); i++) if (words.getJSONArray(i).optString(0).toUpperCase(Locale.ROOT).contains("МЕТОДИКА") && words.getJSONArray(i).getDouble(2) > 0.7) lowerWord = true;
+        assertTrue("Bottom text should have overlay coordinates", lowerWord);
+    }
     @Test public void testRecognizesSyntheticPdf() throws Exception {
         android.graphics.pdf.PdfDocument pdf = new android.graphics.pdf.PdfDocument();
         android.graphics.pdf.PdfDocument.Page page = pdf.startPage(new android.graphics.pdf.PdfDocument.PageInfo.Builder(800, 300, 1).create());

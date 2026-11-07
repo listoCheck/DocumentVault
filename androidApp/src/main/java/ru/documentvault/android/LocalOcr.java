@@ -50,26 +50,68 @@ public final class LocalOcr {
             scan = detectPage ? DocumentScan.scan(bitmap, null) : new DocumentScan.Result(bitmap.copy(Bitmap.Config.ARGB_8888, false), null);
             Bitmap prepared = prepareImage(scan.image);
             try {
-                tess.setImage(prepared); String result = tess.getUTF8Text();
-                org.json.JSONArray words = new org.json.JSONArray();
-                com.googlecode.tesseract.android.ResultIterator it = tess.getResultIterator();
-                if (it != null) try {
-                    it.begin(); int level = TessBaseAPI.PageIteratorLevel.RIL_WORD;
-                    do {
-                        String word = it.getUTF8Text(level); int[] box = it.getBoundingBox(level);
-                        if (word != null && !word.trim().isEmpty() && box != null && box.length == 4 && box[2] > box[0] && box[3] > box[1] && words.length() < 3000) {
-                            org.json.JSONArray entry = new org.json.JSONArray(); entry.put(word.trim());
-                            entry.put((double) box[0] / prepared.getWidth()); entry.put((double) box[1] / prepared.getHeight());
-                            entry.put((double) box[2] / prepared.getWidth()); entry.put((double) box[3] / prepared.getHeight()); words.put(entry);
+                java.util.List<RecognizedWord> found = new java.util.ArrayList<>();
+                for (int mode : new int[]{TessBaseAPI.PageSegMode.PSM_AUTO, TessBaseAPI.PageSegMode.PSM_SPARSE_TEXT}) {
+                    tess.setPageSegMode(mode); recognizeBest(tess, prepared); collectWords(tess, prepared, found);
+                }
+                tess.setPageSegMode(TessBaseAPI.PageSegMode.PSM_AUTO);
+                found.sort((left, right) -> Double.compare(left.centerY(), right.centerY()));
+                java.util.List<java.util.List<RecognizedWord>> lines = new java.util.ArrayList<>();
+                for (RecognizedWord word : found) {
+                    java.util.List<RecognizedWord> chosen = null;
+                    for (java.util.List<RecognizedWord> line : lines) {
+                        for (RecognizedWord existing : line) {
+                            if (Math.abs(existing.centerY() - word.centerY()) <= Math.max(existing.height(), word.height()) * 0.55) { chosen = line; break; }
                         }
-                    } while (words.length() < 3000 && it.next(level));
-                } finally { it.delete(); }
+                        if (chosen != null) break;
+                    }
+                    if (chosen == null) { chosen = new java.util.ArrayList<>(); lines.add(chosen); }
+                    chosen.add(word);
+                }
+                StringBuilder clean = new StringBuilder(); org.json.JSONArray words = new org.json.JSONArray();
+                for (java.util.List<RecognizedWord> line : lines) {
+                    line.sort((left, right) -> Integer.compare(left.box[0], right.box[0])); boolean lineHasText = false;
+                    for (RecognizedWord word : line) {
+                        String value = keepWord(word.value, word.confidence) ? word.value.trim() : "";
+                        if (!value.isEmpty()) { if (!lineHasText && clean.length() > 0) clean.append('\n'); else if (lineHasText) clean.append(' '); clean.append(value); lineHasText = true; }
+                        org.json.JSONArray entry = new org.json.JSONArray(); entry.put(value);
+                        entry.put((double) word.box[0] / prepared.getWidth()); entry.put((double) word.box[1] / prepared.getHeight());
+                        entry.put((double) word.box[2] / prepared.getWidth()); entry.put((double) word.box[3] / prepared.getHeight()); words.put(entry);
+                    }
+                }
                 org.json.JSONObject layout = new org.json.JSONObject().put("version", 1).put("words", words);
                 if (scan.corners != null) { org.json.JSONArray corners = new org.json.JSONArray(); for (float v : scan.corners) corners.put((double) v); layout.put("corners", corners); }
-                return new ImageResult(result == null ? "" : result, layout, scan.corners != null);
+                return new ImageResult(clean.toString(), layout, scan.corners != null);
             }
             finally { prepared.recycle(); }
         } finally { tess.recycle(); if (scan != null) scan.image.recycle(); bitmap.recycle(); }
+    }
+
+    private static final class RecognizedWord {
+        final String value; final int[] box; final float confidence;
+        RecognizedWord(String value, int[] box, float confidence) { this.value = value; this.box = box; this.confidence = confidence; }
+        int height() { return box[3] - box[1]; }
+        double centerY() { return (box[1] + box[3]) / 2.0; }
+    }
+    private static boolean overlaps(int[] a, int[] b) {
+        int width = Math.max(0, Math.min(a[2], b[2]) - Math.max(a[0], b[0]));
+        int height = Math.max(0, Math.min(a[3], b[3]) - Math.max(a[1], b[1]));
+        double minimumArea = Math.min((double) (a[2]-a[0]) * (a[3]-a[1]), (double) (b[2]-b[0]) * (b[3]-b[1]));
+        return minimumArea > 0 && width * (double) height / minimumArea >= 0.6;
+    }
+    private static void collectWords(TessBaseAPI tess, Bitmap image, java.util.List<RecognizedWord> found) {
+        com.googlecode.tesseract.android.ResultIterator it = tess.getResultIterator(); if (it == null) return;
+        try {
+            it.begin(); int level = TessBaseAPI.PageIteratorLevel.RIL_WORD;
+            do {
+                String value = it.getUTF8Text(level); int[] box = it.getBoundingBox(level);
+                if (value == null || value.trim().isEmpty() || box == null || box.length != 4 || box[0] < 0 || box[1] < 0 || box[2] > image.getWidth() || box[3] > image.getHeight() || box[2] <= box[0] || box[3] <= box[1]) continue;
+                RecognizedWord word = new RecognizedWord(value, box, it.confidence(level)); int duplicate = -1;
+                for (int i = 0; i < found.size(); i++) if (overlaps(found.get(i).box, box)) { duplicate = i; break; }
+                if (duplicate < 0 && found.size() < 3000) found.add(word);
+                else if (duplicate >= 0 && word.confidence > found.get(duplicate).confidence + 5) found.set(duplicate, word);
+            } while (found.size() < 3000 && it.next(level));
+        } finally { it.delete(); }
     }
 
     private static int readOrientation(byte[] input) {
@@ -119,8 +161,9 @@ public final class LocalOcr {
                         try {
                             bitmap.eraseColor(Color.WHITE);
                             page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY);
-                            tess.setImage(bitmap);
-                            String text = tess.getUTF8Text();
+                            Bitmap prepared = prepareImage(bitmap);
+                            String text;
+                            try { recognizeBest(tess, prepared); text = cleanRecognizedText(tess); } finally { prepared.recycle(); }
                             if (text != null) result.append(text).append('\n');
                         } finally { bitmap.recycle(); }
                     }
@@ -130,6 +173,48 @@ public final class LocalOcr {
         } finally { tess.recycle(); temporary.delete(); }
     }
 
+    private static String cleanRecognizedText(TessBaseAPI tess) {
+        StringBuilder text = new StringBuilder();
+        com.googlecode.tesseract.android.ResultIterator it = tess.getResultIterator();
+        if (it == null) return "";
+        try {
+            it.begin(); int level = TessBaseAPI.PageIteratorLevel.RIL_WORD;
+            do {
+                String word = it.getUTF8Text(level);
+                if (word == null || word.trim().isEmpty() || !keepWord(word, it.confidence(level))) continue;
+                if (text.length() > 0) text.append(it.isAtBeginningOf(TessBaseAPI.PageIteratorLevel.RIL_TEXTLINE) ? '\n' : ' ');
+                text.append(word.trim());
+            } while (it.next(level));
+            return text.toString();
+        } finally { it.delete(); }
+    }
+    private static boolean keepWord(String word, float confidence) {
+        String trimmed = word.trim();
+        if (trimmed.matches(".*\\d.*")) return true;
+        if (!trimmed.matches(".*[\\p{L}\\p{N}].*")) return false;
+        return confidence >= 15f;
+    }
+    /** Compare the regular scan with an adaptive threshold for uneven illumination. */
+    private static String recognizeBest(TessBaseAPI tess, Bitmap input) {
+        tess.setImage(input); String original = tess.getUTF8Text(); int originalConfidence = tess.meanConfidence();
+        if (originalConfidence >= 80 || input.getWidth() < 50 || input.getHeight() < 50) return original;
+        Bitmap binary = null; org.opencv.core.Mat rgba = new org.opencv.core.Mat(), gray = new org.opencv.core.Mat();
+        try {
+            if (!org.opencv.android.OpenCVLoader.initLocal()) return original;
+            org.opencv.android.Utils.bitmapToMat(input, rgba);
+            org.opencv.imgproc.Imgproc.cvtColor(rgba, gray, org.opencv.imgproc.Imgproc.COLOR_RGBA2GRAY);
+            org.opencv.imgproc.Imgproc.adaptiveThreshold(gray, gray, 255, org.opencv.imgproc.Imgproc.ADAPTIVE_THRESH_GAUSSIAN_C, org.opencv.imgproc.Imgproc.THRESH_BINARY, 31, 15);
+            binary = Bitmap.createBitmap(input.getWidth(), input.getHeight(), Bitmap.Config.ARGB_8888);
+            org.opencv.android.Utils.matToBitmap(gray, binary);
+            tess.setImage(binary); String alternative = tess.getUTF8Text(); int confidence = tess.meanConfidence();
+            int originalLength = original == null ? 0 : original.trim().length();
+            int alternativeLength = alternative == null ? 0 : alternative.trim().length();
+            if (confidence > originalConfidence + 3 && alternativeLength >= originalLength * 0.8) return alternative;
+            tess.setImage(input); return tess.getUTF8Text();
+        } catch (RuntimeException | LinkageError ignored) {
+            tess.setImage(input); return tess.getUTF8Text();
+        } finally { rgba.release(); gray.release(); if (binary != null) binary.recycle(); }
+    }
     private static Bitmap prepareImage(Bitmap source) {
         float scale = Math.min(2f, Math.max(1f, 1600f / Math.max(source.getWidth(), source.getHeight())));
         Bitmap result = Bitmap.createBitmap(Math.max(1, Math.round(source.getWidth() * scale)), Math.max(1, Math.round(source.getHeight() * scale)), Bitmap.Config.ARGB_8888);

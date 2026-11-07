@@ -1,0 +1,72 @@
+.app { -fx-background-color: #0f1117; -fx-font-family: "Segoe UI"; -fx-font-size: 13px; -fx-text-fill: #f2f2ec; }
+.app:light { -fx-background-color: #f4f4f9; }
+.app .label { -fx-text-fill: #f2f2ec; }
+.app:light .label { -fx-text-fill: #1c1b24; }
+.app .logo { -fx-font-size: 22px; -fx-font-weight: bold; -fx-text-fill: #c8ff45; }
+.app:light .logo { -fx-text-fill: #4c7208; }
+.app .brand { -fx-font-size: 16px; -fx-font-weight: bold; }
+.app .eyebrow { -fx-font-size: 10px; -fx-font-weight: bold; -fx-text-fill: #b49dff; }
+.app:light .eyebrow { -fx-text-fill: #5c3a99; }
+.app .title { -fx-font-size: 34px; -fx-font-weight: bold; }
+.app .muted, .app .status, .app .tiny { -fx-text-fill: #aab1bd; }
+.app:light .muted, .app:light .status, .app:light .tiny { -fx-text-fill: #585767; }
+.app .tiny { -fx-font-size: 9px; }
+.app .card { -fx-background-color: #191c25; -fx-background-radius: 12px; -fx-padding: 20px; }
+.app:light .card { -fx-background-color: #ffffff; }
+.app .text-field, .app .password-field { -fx-background-color: #222630; -fx-background-radius: 8px; -fx-padding: 11px 12px; -fx-text-fill: #f2f2ec; -fx-prompt-text-fill: #9ba2af; -fx-highlight-fill: #75669e; }
+.app:light .text-field, .app:light .password-field { -fx-background-color: #e8e7f0; -fx-text-fill: #1c1b24; -fx-prompt-text-fill: #686577; }
+.app .button { -fx-background-radius: 8px; -fx-padding: 10px 16px; -fx-cursor: hand; -fx-font-weight: bold; }
+.app .secondary { -fx-background-color: #222630; -fx-text-fill: #f2f2ec; }
+.app .secondary:hover { -fx-background-color: #34394a; }
+.app:light .secondary { -fx-background-color: #e8e7f0; -fx-text-fill: #1c1b24; }
+.app:light .secondary:hover { -fx-background-color: #d9d6e6; }
+.app .primary { -fx-background-color: #c8ff45; -fx-text-fill: #101217; }
+.app .primary:hover { -fx-background-color: #ddff80; }
+.app .button:focused, .app .text-field:focused, .app .list-view:focused { -fx-border-color: #b49dff; -fx-border-radius: 8px; }
+.app .list-view { -fx-background-color: transparent; -fx-control-inner-background: #191c25; -fx-border-color: transparent; }
+.app .list-cell { -fx-background-color: transparent; -fx-text-fill: #f2f2ec; -fx-padding: 14px; }
+.app .list-cell:filled:selected { -fx-background-color: #373846; -fx-background-radius: 8px; -fx-text-fill: #c8ff45; }
+.app:light .list-view { -fx-control-inner-background: #ffffff; }
+.app:light .list-cell { -fx-text-fill: #1c1b24; }
+.app:light .list-cell:filled:selected { -fx-background-color: #ded7f4; -fx-text-fill: #2b213d; }
+.vault-context-menu { -fx-background-color: #ffffff; -fx-background-radius: 10; -fx-padding: 6; -fx-border-color: #c8c4d3; -fx-border-radius: 10; }
+.vault-menu-light { -fx-background-color: #ffffff; -fx-background-radius: 10; -fx-padding: 6; -fx-border-color: #d2cfde; -fx-border-radius: 10; }
+.vault-context-menu .menu-item { -fx-padding: 9 16; -fx-background-radius: 6; }
+.vault-context-menu .menu-item .label { -fx-text-fill: #1c1b24; }
+.vault-menu-light .menu-item .label { -fx-text-fill: #26232e; }
+.vault-context-menu .menu-item:focused { -fx-background-color: #ece8f8; }
+.vault-menu-light .menu-item:focused { -fx-background-color: #ece8f8; }
+.app .preview-pane { -fx-background-color: transparent; -fx-background-insets: 0; -fx-border-color: #424655; -fx-border-radius: 6; }
+.app .preview-pane > .viewport { -fx-background-color: #101217; }
+.app:light .preview-pane { -fx-border-color: #d2cfde; }
+.app:light .preview-pane > .viewport { -fx-background-color: #e8e7f0; }
+.app .folder-scroll { -fx-background-color: transparent; -fx-background-insets: 0; -fx-padding: 0; }
+.app .folder-scroll > .viewport { -fx-background-color: transparent; }
+.app .folder-chip { -fx-background-color: #222630; -fx-text-fill: #d5d9e3; -fx-padding: 8px 13px; }
+.app .folder-active { -fx-background-color: #c8ff45; -fx-text-fill: #101217; -fx-padding: 8px 13px; }
+.app:light .folder-chip { -fx-background-color: #e8e7f0; -fx-text-fill: #292433; }
+.vault-dialog { -fx-font-family: "Segoe UI"; -fx-font-size: 13px; -fx-background-radius: 12px; -fx-padding: 18px; }
+.vault-dialog-dark, .vault-dialog-dark > .header-panel { -fx-background-color: #191c25; }
+.vault-dialog-light, .vault-dialog-light > .header-panel { -fx-background-color: #ffffff; }
+.vault-dialog-dark .label { -fx-text-fill: #f2f2ec; }
+.vault-dialog-light .label { -fx-text-fill: #1c1b24; }
+.vault-dialog .button { -fx-background-radius: 8px; -fx-padding: 9px 16px; -fx-font-weight: bold; -fx-cursor: hand; }
+.vault-dialog-dark .button { -fx-background-color: #353949; -fx-text-fill: #f2f2ec; }
+.vault-dialog-light .button { -fx-background-color: #e8e7f0; -fx-text-fill: #1c1b24; }
+.vault-dialog .button:default { -fx-background-color: #c8ff45; -fx-text-fill: #101217; }
+.vault-dialog-dark .text-field, .vault-dialog-dark .text-area, .vault-dialog-dark .combo-box { -fx-background-color: #303440; -fx-text-fill: #f2f2ec; }
+.vault-dialog-dark .text-area .content { -fx-background-color: #303440; }
+.vault-dialog-light .text-field, .vault-dialog-light .text-area, .vault-dialog-light .combo-box { -fx-background-color: #e8e7f0; -fx-text-fill: #1c1b24; }
+.app .text-area, .app .text-area .content { -fx-control-inner-background: #222630; -fx-text-fill: #f2f2ec; }
+.app:light .text-area, .app:light .text-area .content { -fx-control-inner-background: #f4f4f9; -fx-text-fill: #1c1b24; }
+.app .split-pane { -fx-background-color: transparent; }
+.app .split-pane-divider { -fx-background-color: transparent; -fx-padding: 0 5px; }
+.app .scroll-bar { -fx-background-color: transparent; }
+.app .scroll-bar .track { -fx-background-color: transparent; }
+.app .scroll-bar .thumb { -fx-background-color: #55596a; -fx-background-radius: 6; }
+.app .scroll-bar .increment-button, .app .scroll-bar .decrement-button { -fx-background-color: transparent; }
+.app:light .scroll-bar .thumb { -fx-background-color: #b6b2c5; }
+.app .folder-tile { -fx-background-color: #292b39; -fx-text-fill: #e2d6ff; -fx-padding: 14px 18px; -fx-min-width: 170px; -fx-alignment: center-left; -fx-border-color: #4d4862; -fx-border-radius: 8px; }
+.app .folder-tile:hover { -fx-background-color: #3a3b4d; }
+.app:light .folder-tile { -fx-background-color: #f0ecf9; -fx-text-fill: #4b326d; -fx-border-color: #d3c9e6; }
+.app:light .folder-tile:hover { -fx-background-color: #e3daf5; }

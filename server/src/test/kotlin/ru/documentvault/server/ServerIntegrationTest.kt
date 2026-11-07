@@ -43,7 +43,9 @@ class ServerIntegrationTest {
             fun login(name: String): String {
                 val result = request("POST", "/v1/sessions", mapper.writeValueAsBytes(mapOf("username" to name, "password" to "password-for-login")))
                 assertEquals(200, result.statusCode())
-                return mapper.readTree(result.body())["token"].asText()
+                val session = mapper.readTree(result.body())
+                assertTrue(session["expiresAt"].asLong() - java.time.Instant.now().epochSecond in (30L * 24 * 60 * 60 - 10)..(30L * 24 * 60 * 60))
+                return session["token"].asText()
             }
             val masterKey = VaultCrypto.newMasterKey()
             val salt = VaultCrypto.newSalt()
@@ -85,6 +87,10 @@ class ServerIntegrationTest {
                 assertEquals(200, restoredDocument.statusCode())
                 assertContentEquals(plaintext, VaultCrypto.decrypt(masterKey, restoredDocument.body(), "document:$id".toByteArray()))
             } finally { restored.stop() }
+            assertEquals(204, request("DELETE", "/v1/documents/$id", token = alice).statusCode())
+            assertEquals(404, request("GET", "/v1/documents/$id", token = alice).statusCode())
+            assertEquals(404, request("GET", "/v1/documents/$id/metadata", token = alice).statusCode())
+            assertFalse(String(request("GET", "/v1/documents", token = alice).body()).contains(id))
             assertEquals(204, request("DELETE", "/v1/sessions/current", token = alice).statusCode())
             assertEquals(401, request("GET", "/v1/vault", token = alice).statusCode())
         } finally { app.stop() }

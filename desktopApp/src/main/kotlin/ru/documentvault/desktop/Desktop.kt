@@ -6,6 +6,12 @@ import ru.documentvault.core.DocumentDates
 import ru.documentvault.core.OcrSearch
 import java.awt.BorderLayout
 import java.awt.FlowLayout
+import java.awt.Color
+import java.awt.Font
+import java.awt.Dimension
+import javax.swing.border.EmptyBorder
+import javax.swing.border.CompoundBorder
+import javax.swing.border.LineBorder
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
@@ -18,7 +24,7 @@ import javax.swing.*
 import javax.swing.filechooser.FileNameExtensionFilter
 import javax.swing.SwingWorker
 
-private val ROOT = System.getenv("VAULT_SERVER_URL") ?: "http://127.0.0.1:7070"
+private val ROOT = System.getenv("VAULT_SERVER_URL") ?: "https://95.174.95.143"
 private const val MAX_FILE_SIZE = 15L * 1024 * 1024
 private val json = ObjectMapper()
 private val b64 = Base64.getEncoder()
@@ -74,10 +80,11 @@ class VaultApi(private val root: String = ROOT) {
     fun download(token: String, id: String): ByteArray = request("GET", "/v1/documents/$id", token = token)
     fun metadata(token: String, id: String): ByteArray? = try { request("GET", "/v1/documents/$id/metadata", token = token) } catch (e: ApiException) { if (e.status == 404) null else throw e }
     fun saveMetadata(token: String, id: String, data: ByteArray) { request("PUT", "/v1/documents/$id/metadata", data, token) }
+    fun delete(token: String, id: String) { request("DELETE", "/v1/documents/$id", token = token) }
     fun logout(token: String) { request("DELETE", "/v1/sessions/current", token = token) }
 }
 
-class VaultWindow : JFrame("DocumentVault — локальный прототип") {
+class VaultWindow(private val themePrefs: java.util.prefs.Preferences = java.util.prefs.Preferences.userNodeForPackage(VaultWindow::class.java)) : JFrame("DocumentVault") {
     private val api = VaultApi()
     private var token: String? = null
     private var accountIdentity: String? = null
@@ -95,38 +102,184 @@ class VaultWindow : JFrame("DocumentVault — локальный прототи�
     private val status = JLabel("Сервер: $ROOT. Выполните вход или регистрацию.")
     private val buttons = mutableListOf<JButton>()
 
+    private val background = Color(15, 17, 23)
+    private val surface = Color(25, 28, 37)
+    private val surfaceAlt = Color(33, 36, 48)
+    private val foreground = Color(242, 242, 236)
+    private val muted = Color(157, 163, 172)
+    private val acid = Color(200, 255, 69)
+    private val violet = Color(180, 157, 255)
+    private var lightTheme = themePrefs.getBoolean("lightTheme", false)
+    private lateinit var themeButton: JButton
+
     init {
         defaultCloseOperation = EXIT_ON_CLOSE
-        setSize(820, 480)
+        minimumSize = Dimension(900, 650)
+        setSize(1160, 800)
         setLocationRelativeTo(null)
+        contentPane.background = this@VaultWindow.background
+        contentPane.layout = BorderLayout(0, 0)
+
+        fun caption(text: String, size: Int = 12, color: Color = muted, bold: Boolean = false) = JLabel(text).apply {
+            foreground = color; font = Font("Segoe UI", if (bold) Font.BOLD else Font.PLAIN, size); alignmentX = java.awt.Component.LEFT_ALIGNMENT
+        }
+        fun panel(color: Color = surface) = JPanel().apply { background = color; border = EmptyBorder(20, 20, 20, 20) }
+        fun stack(color: Color = surface) = panel(color).apply { layout = BoxLayout(this, BoxLayout.Y_AXIS) }
+        fun gap(height: Int) = Box.createVerticalStrut(height)
+        fun leftButton(text: String, action: () -> Unit) = button(text, action).apply {
+            alignmentX = LEFT_ALIGNMENT; maximumSize = Dimension(Int.MAX_VALUE, 42)
+        }
+        fun styleInput(field: JTextField) {
+            field.font = Font("Segoe UI", Font.PLAIN, 14); field.foreground = foreground; field.caretColor = acid
+            field.background = surfaceAlt; field.border = CompoundBorder(LineBorder(Color(65, 68, 79), 1, true), EmptyBorder(10, 12, 10, 12))
+            field.alignmentX = java.awt.Component.LEFT_ALIGNMENT; field.maximumSize = Dimension(Int.MAX_VALUE, 42)
+        }
+        styleInput(user); styleInput(password); styleInput(query)
+        password.addActionListener { login() }; query.addActionListener { search() }
+        user.toolTipText = "Логин"; password.toolTipText = "Пароль входа"; query.toolTipText = "Поиск по названию и тексту"
+
+        val header = JPanel(BorderLayout()).apply { background = this@VaultWindow.background; border = EmptyBorder(24, 28, 20, 28) }
+        val brand = JPanel(FlowLayout(FlowLayout.LEFT, 12, 0)).apply {
+            background = this@VaultWindow.background
+            add(caption("DV /", 20, acid, true)); add(caption("DOCUMENT VAULT", 16, this@VaultWindow.foreground, true))
+            add(caption("  PRIVATE SPACE", 11, violet, true))
+        }
+        header.add(brand, BorderLayout.WEST)
+        themeButton = button("", ::toggleTheme).apply { preferredSize = Dimension(145, 38); toolTipText = "Переключить цветовую тему" }
+        val headerActions = JPanel(FlowLayout(FlowLayout.RIGHT, 12, 0)).apply {
+            background = this@VaultWindow.background
+            add(caption("ЗАЩИЩЁННОЕ ХРАНИЛИЩЕ  ●", 11, acid, true)); add(themeButton)
+        }
+        header.add(headerActions, BorderLayout.EAST)
+        contentPane.add(header, BorderLayout.NORTH)
+
+        val sidebar = stack().apply { preferredSize = Dimension(270, 0); border = EmptyBorder(22, 22, 22, 22) }
+        sidebar.add(caption("01 / АККАУНТ", 11, violet, true)); sidebar.add(gap(18))
+        sidebar.add(caption("Логин", 12, muted)); sidebar.add(gap(6)); sidebar.add(user); sidebar.add(gap(12))
+        sidebar.add(caption("Пароль", 12, muted)); sidebar.add(gap(6)); sidebar.add(password); sidebar.add(gap(14))
+        sidebar.add(leftButton("Войти") { login() }.apply { background = acid; foreground = this@VaultWindow.background }); sidebar.add(gap(8))
+        sidebar.add(leftButton("Создать аккаунт") { register() }); sidebar.add(gap(8)); sidebar.add(leftButton("Выйти") { logout() })
+        sidebar.add(gap(28)); sidebar.add(caption("02 / ДОСТУП", 11, violet, true)); sidebar.add(gap(14))
+        sidebar.add(leftButton("Разблокировать") { unlock() }); sidebar.add(gap(8)); sidebar.add(leftButton("Заблокировать") { lock() })
+        sidebar.add(Box.createVerticalGlue()); sidebar.add(gap(20))
+        sidebar.add(caption("AES-256 / ЛОКАЛЬНОЕ ШИФРОВАНИЕ", 10, muted, true))
+
+        val main = panel(background).apply { layout = BorderLayout(0, 16); border = EmptyBorder(0, 20, 0, 0) }
+        val top = stack(background).apply { border = EmptyBorder(0, 0, 0, 0) }
+        top.add(caption("ВАШЕ ПРОСТРАНСТВО / 01", 11, violet, true)); top.add(gap(8))
+        top.add(caption("Документы", 34, foreground, true)); top.add(gap(6))
+        top.add(caption("Всё важное — в одном защищённом месте.", 14, muted)); top.add(gap(20))
+        top.add(caption("ПОИСК ПО НАЗВАНИЮ И ТЕКСТУ", 10, muted, true)); top.add(gap(8))
+        val toolbar = JPanel(BorderLayout(10, 0)).apply { background = this@VaultWindow.background }
+        toolbar.add(query, BorderLayout.CENTER)
+        val searchActions = JPanel(FlowLayout(FlowLayout.RIGHT, 8, 0)).apply {
+            background = this@VaultWindow.background; add(button("Найти") { search() }); add(button("Обновить") { refresh() })
+            add(button("+ Добавить файл") { upload() }.apply { background = acid; foreground = this@VaultWindow.background })
+        }
+        toolbar.add(searchActions, BorderLayout.EAST); toolbar.alignmentX = java.awt.Component.LEFT_ALIGNMENT; toolbar.maximumSize = Dimension(Int.MAX_VALUE, 44); top.add(toolbar)
+        main.add(top, BorderLayout.NORTH)
+
+        list.background = surface; list.foreground = foreground; list.selectionBackground = Color(55, 56, 70)
+        list.selectionForeground = acid; list.font = Font("Segoe UI", Font.PLAIN, 15); list.fixedCellHeight = 58
+        list.border = EmptyBorder(8, 8, 8, 8)
         list.cellRenderer = object : DefaultListCellRenderer() {
             override fun getListCellRendererComponent(list: JList<*>?, value: Any?, index: Int, selected: Boolean, focus: Boolean): java.awt.Component {
                 val id = value as? String ?: ""
-                return super.getListCellRendererComponent(list, documentNames[id] ?: id, index, selected, focus)
+                return super.getListCellRendererComponent(list, "  ◇   " + (documentNames[id] ?: id), index, selected, focus).apply {
+                    border = EmptyBorder(8, 12, 8, 12); font = Font("Segoe UI", Font.PLAIN, 15)
+                }
             }
         }
-        val auth = JPanel(FlowLayout(FlowLayout.LEFT)).apply {
-            add(JLabel("Логин:")); add(user); add(JLabel("Пароль:")); add(password)
-            add(button("Регистрация") { register() }); add(button("Войти") { login() }); add(button("Выйти") { logout() })
+        val documents = JPanel(BorderLayout()).apply {
+            background = surface; border = CompoundBorder(LineBorder(Color(51, 54, 65), 1, true), EmptyBorder(18, 18, 18, 18))
+            add(caption("МОИ ДОКУМЕНТЫ", 11, violet, true).apply { border = EmptyBorder(0, 0, 12, 0) }, BorderLayout.NORTH)
+            val documentContent = JPanel(java.awt.CardLayout()).apply {
+                background = surface
+                add(JScrollPane(list).apply { border = null; viewport.background = surface }, "list")
+                add(JLabel("<html><center>Здесь появятся ваши документы<br><br>Войдите, разблокируйте хранилище и нажмите «Обновить»<br>или добавьте первый файл.</center></html>", SwingConstants.CENTER).apply {
+                    foreground = muted; font = Font("Segoe UI", Font.PLAIN, 14)
+                }, "empty")
+            }
+            fun showContent() { (documentContent.layout as java.awt.CardLayout).show(documentContent, if (model.isEmpty) "empty" else "list") }
+            model.addListDataListener(object : javax.swing.event.ListDataListener {
+                override fun intervalAdded(e: javax.swing.event.ListDataEvent) = showContent()
+                override fun intervalRemoved(e: javax.swing.event.ListDataEvent) = showContent()
+                override fun contentsChanged(e: javax.swing.event.ListDataEvent) = showContent()
+            })
+            showContent(); add(documentContent, BorderLayout.CENTER)
         }
-        val actions = JPanel(FlowLayout(FlowLayout.LEFT)).apply {
-            add(button("Разблокировать") { unlock() }); add(button("Заблокировать") { lock() })
-            add(button("Обновить") { refresh() }); add(button("Добавить файл") { upload() }); add(button("Сохранить файл") { download() })
+        main.add(documents, BorderLayout.CENTER)
+        val tools = JPanel(java.awt.GridLayout(0, 3, 8, 8)).apply {
+            background = this@VaultWindow.background
+            add(button("Сохранить файл") { download() }); add(button("Распознать текст") { analyze() }); add(button("Сроки") { showExpiries() })
+            add(button("Изменить срок") { editExpiry() }); add(button("Фоновые уведомления") { installReminders() })
         }
-        val search = JPanel(FlowLayout(FlowLayout.LEFT)).apply {
-            add(button("Распознать выбранный") { analyze() }); add(JLabel("Поиск:")); add(query)
-            add(button("Найти") { search() })
-            add(button("Сроки") { showExpiries() })
-            add(button("Изменить срок") { editExpiry() })
-        }
-        val reminders = JPanel(FlowLayout(FlowLayout.LEFT)).apply { add(button("Включить фоновые уведомления") { installReminders() }) }
-        val top = JPanel().apply { layout = BoxLayout(this, BoxLayout.Y_AXIS); add(auth); add(actions); add(search); add(reminders) }
-        contentPane.add(top, BorderLayout.NORTH)
-        contentPane.add(JScrollPane(list), BorderLayout.CENTER)
+        main.add(tools, BorderLayout.SOUTH)
+        val body = JPanel(BorderLayout()).apply { background = this@VaultWindow.background; border = EmptyBorder(0, 28, 0, 28); add(sidebar, BorderLayout.WEST); add(main, BorderLayout.CENTER) }
+        contentPane.add(body, BorderLayout.CENTER)
+        status.foreground = muted; status.font = Font("Segoe UI", Font.PLAIN, 12); status.border = EmptyBorder(16, 30, 20, 30)
         contentPane.add(status, BorderLayout.SOUTH)
+        applyTheme()
         Timer(60_000) { notifyExpiries() }.start()
     }
-    private fun button(label: String, action: () -> Unit): JButton = JButton(label).also { button ->
+    private fun toggleTheme() {
+        lightTheme = !lightTheme
+        try { themePrefs.putBoolean("lightTheme", lightTheme) } catch (_: SecurityException) { status.text = "Не удалось сохранить тему." }
+        applyTheme()
+    }
+    private fun applyTheme() {
+        val palette = mapOf(
+            background to Color(244, 244, 249), surface to Color(255, 255, 255),
+            surfaceAlt to Color(232, 231, 240), foreground to Color(28, 27, 36),
+            muted to Color(88, 87, 103), violet to Color(92, 58, 153),
+            Color(65, 68, 79) to Color(185, 183, 197), Color(51, 54, 65) to Color(218, 216, 227),
+            Color(55, 56, 70) to Color(220, 213, 244)
+        )
+        fun mapped(color: Color?, text: Boolean = false): Color? {
+            if (color == null || !lightTheme) return color
+            if (text && color == acid) return Color(60, 93, 5)
+            return palette[color] ?: color
+        }
+        fun recolor(component: java.awt.Component) {
+            if (component is JComponent) {
+                if (component.getClientProperty("dv.background") == null) component.putClientProperty("dv.background", component.background)
+                if (component.getClientProperty("dv.foreground") == null) component.putClientProperty("dv.foreground", component.foreground)
+                val initialBg = component.getClientProperty("dv.background") as? Color
+                val initialFg = component.getClientProperty("dv.foreground") as? Color
+                component.background = mapped(initialBg)
+                component.foreground = if (component is JButton && initialBg == acid) Color(15, 17, 23) else mapped(initialFg, true)
+                if (component is JTextField) {
+                    component.caretColor = if (lightTheme) Color(43, 41, 55) else acid
+                    component.border = CompoundBorder(LineBorder(if (lightTheme) Color(185, 183, 197) else Color(65, 68, 79), 1, true), EmptyBorder(10, 12, 10, 12))
+                }
+                if (component is JList<*>) {
+                    component.selectionBackground = if (lightTheme) Color(220, 213, 244) else Color(55, 56, 70)
+                    component.selectionForeground = if (lightTheme) Color(43, 33, 61) else acid
+                }
+                if (component is JPanel && component.border is CompoundBorder) {
+                    component.border = CompoundBorder(LineBorder(if (lightTheme) Color(218, 216, 227) else Color(51, 54, 65), 1, true), EmptyBorder(18, 18, 18, 18))
+                }
+            }
+            if (component is java.awt.Container) component.components.forEach(::recolor)
+        }
+        recolor(contentPane)
+        themeButton.text = if (lightTheme) "Тёмная тема" else "Светлая тема"
+        contentPane.repaint()
+    }
+    private fun button(label: String, action: () -> Unit): JButton = object : JButton(label) {
+        override fun paintComponent(graphics: java.awt.Graphics) {
+            val g = graphics.create() as java.awt.Graphics2D
+            try {
+                g.setRenderingHint(java.awt.RenderingHints.KEY_ANTIALIASING, java.awt.RenderingHints.VALUE_ANTIALIAS_ON)
+                val base = if (!isEnabled) background.darker() else if (model.isPressed) background.darker() else if (model.isRollover) background.brighter() else background
+                g.color = base; g.fillRoundRect(0, 0, width, height, 12, 12)
+            } finally { g.dispose() }
+            super.paintComponent(graphics)
+        }
+    }.also { button ->
+        button.background = surfaceAlt; button.foreground = foreground; button.font = Font("Segoe UI", Font.BOLD, 13)
+        button.isFocusPainted = false; button.isBorderPainted = false; button.isContentAreaFilled = false; button.isOpaque = false
+        button.border = EmptyBorder(10, 14, 10, 14); button.cursor = java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR)
         buttons.add(button); button.addActionListener { action() }
     }
     private fun recoveryPrompt(title: String): CharArray? {
@@ -146,7 +299,7 @@ class VaultWindow : JFrame("DocumentVault — локальный прототи�
                     val messageText = when (cause) {
                         is ApiException -> when (cause.status) { 401 -> "Неверный пароль или сессия завершена."; 409 -> "Такая запись уже существует."; 400 -> "Некорректные данные. Логин: 3–40 латинских символов, цифр или _.−; пароль: от 12 символов, до 72 байт UTF-8."; else -> cause.message }
                         is javax.crypto.AEADBadTagException -> "Неверный пароль восстановления или повреждены данные."
-                        is java.net.ConnectException -> "Не удалось подключиться к серверу. Запустите :server:run."
+                        is java.net.ConnectException -> "Не удалось подключиться к серверу. Проверьте интернет и адрес сервера."
                         else -> cause.message ?: cause.javaClass.simpleName
                     }
                     JOptionPane.showMessageDialog(this@VaultWindow, messageText, "Ошибка", JOptionPane.ERROR_MESSAGE)
@@ -272,18 +425,7 @@ class VaultWindow : JFrame("DocumentVault — локальный прототи�
         }) { (name, text) ->
             documentNames[id] = name; list.repaint()
             recognized[id] = text
-            val dates = DocumentDates.find(text)
-            val suggestions = if (dates.isEmpty()) "Даты не найдены." else dates.joinToString("\n") {
-                "${it.date} ${if (it.likelyExpiry) "— возможный срок действия" else "— дата"}: ${it.excerpt}"
-            }
-            val content = JTextArea("Даты — проверьте вручную:\n$suggestions\n\nРаспознанный текст:\n$text", 25, 70).apply { isEditable = false; lineWrap = true; wrapStyleWord = true; caretPosition = 0 }
-            JOptionPane.showMessageDialog(this, JScrollPane(content), "Результат распознавания", JOptionPane.INFORMATION_MESSAGE)
-            val proposed = expiryDates[id]?.toString() ?: dates.firstOrNull { it.likelyExpiry }?.date?.toString() ?: ""
-            val entered = JOptionPane.showInputDialog(this, "Подтвердите дату окончания в формате ГГГГ-ММ-ДД. Оставьте пустым, если срока нет.", proposed)
-            if (entered != null) {
-                val expiry = if (entered.isBlank()) null else try { java.time.LocalDate.parse(entered.trim()) } catch (_: Exception) {
-                    JOptionPane.showMessageDialog(this, "Неверная дата. Распознайте документ ещё раз для сохранения."); return@runTask
-                }
+            val expiry = expiryDates[id] ?: DocumentDates.automaticExpiry(text)
                 val saveKey = masterKey?.copyOf() ?: return@runTask
                 val identity = accountIdentity
                 SwingUtilities.invokeLater {
@@ -299,9 +441,8 @@ class VaultWindow : JFrame("DocumentVault — локальный прототи�
                             try { api.saveMetadata(current, id, VaultCrypto.encrypt(saveKey, bytes, "metadata:$id".toByteArray())) } finally { bytes.fill(0) }
                             if (identity != null && System.getProperty("os.name").startsWith("Windows")) runCatching { WindowsReminderStore().put(identity, id, expiry) }.isSuccess else true
                         } finally { saveKey.fill(0) }
-                    }) { reminderSaved -> if (expiry != null) expiryDates[id] = expiry else expiryDates.remove(id); status.text = if (reminderSaved) "Распознанный текст и срок сохранены в зашифрованном виде." else "Документ сохранён, но расписание уведомлений не обновлено." }
+                    }) { reminderSaved -> if (expiry != null) expiryDates[id] = expiry else expiryDates.remove(id); status.text = if (reminderSaved) (if (expiry == null) "Текст сохранён. Срок действия автоматически не найден." else "Текст сохранён. Срок: $expiry. Проверьте его в документе.") else "Документ сохранён, но расписание уведомлений не обновлено." }
                 }
-            } else { status.text = "Текст доступен для поиска до блокировки. Для сохранения повторите распознавание." }
         }
     }
     private fun search() {
@@ -315,7 +456,7 @@ class VaultWindow : JFrame("DocumentVault — локальный прототи�
     private fun showExpiries() {
         if (masterKey == null) { JOptionPane.showMessageDialog(this, "Сначала разблокируйте хранилище."); return }
         val lines = expiryDates.entries.sortedBy { it.value }.joinToString("\n") { "${it.value} — ${documentNames[it.key] ?: it.key}${if (it.value.isBefore(java.time.LocalDate.now())) " (истёк)" else ""}" }
-        JOptionPane.showMessageDialog(this, lines.ifEmpty { "Подтверждённые сроки не найдены. Обновите список после разблокировки." }, "Сроки документов", JOptionPane.INFORMATION_MESSAGE)
+        JOptionPane.showMessageDialog(this, lines.ifEmpty { "Сроки не найдены. Обновите список после разблокировки." }, "Сроки документов", JOptionPane.INFORMATION_MESSAGE)
     }
     private fun editExpiry() {
         val current = token ?: run { JOptionPane.showMessageDialog(this, "Сначала войдите в аккаунт."); return }

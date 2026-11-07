@@ -67,10 +67,13 @@ public final class MainActivity extends FragmentActivity {
     private final java.util.Map<String, String> documentExpiry = new java.util.HashMap<>();
     private final java.util.Map<String, String> documentText = new java.util.HashMap<>();
     private final java.util.Map<String, String> documentFolders = new java.util.HashMap<>();
+    private final java.util.Set<String> savedFolders = new java.util.TreeSet<>();
     private String selectedFolder = null;
+    private String activeOcrId;
     private AlertDialog previewDialog;
     private File pendingCapture;
     private BiometricKeyStore biometricStore;
+    private SessionStore sessionStore;
     private String accountIdentity;
     private Button biometricUnlock;
     private volatile boolean busy;
@@ -79,6 +82,7 @@ public final class MainActivity extends FragmentActivity {
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
         biometricStore = new BiometricKeyStore(this);
+        sessionStore = new SessionStore(this);
         String pendingName = state == null ? null : state.getString("cameraFile");
         File cameraDir = new File(getCacheDir(), "camera");
         if (pendingName != null && pendingName.matches("capture-[a-zA-Z0-9-]+\\.jpg")) pendingCapture = new File(cameraDir, pendingName);
@@ -89,23 +93,23 @@ public final class MainActivity extends FragmentActivity {
         File[] stalePreviews = new File(getCacheDir(), "preview").listFiles();
         if (stalePreviews != null) for (File file : stalePreviews) if (file.isFile() && file.getName().startsWith("preview-")) file.delete();
         getWindow().setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE);
-        getWindow().setStatusBarColor(Color.rgb(245, 248, 246));
-        getWindow().setNavigationBarColor(Color.rgb(245, 248, 246));
+        getWindow().setStatusBarColor(Color.rgb(242, 240, 250));
+        getWindow().setNavigationBarColor(Color.rgb(242, 240, 250));
         getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
-        LinearLayout layout = column(); layout.setPadding(dp(22), dp(24), dp(22), dp(36)); layout.setBackgroundColor(Color.rgb(245, 248, 246));
+        LinearLayout layout = column(); layout.setPadding(dp(22), dp(24), dp(22), dp(36)); layout.setBackgroundColor(Color.rgb(242, 240, 250));
         LinearLayout brand = new LinearLayout(this); brand.setGravity(Gravity.CENTER_VERTICAL);
-        TextView mark = label("DV", 15, Color.WHITE, true); mark.setGravity(Gravity.CENTER); mark.setBackground(round(Color.rgb(22, 79, 71), 14));
+        TextView mark = label("DV", 15, Color.WHITE, true); mark.setGravity(Gravity.CENTER); mark.setBackground(round(Color.rgb(25, 24, 34), 14)); mark.setTextColor(Color.rgb(190, 245, 58));
         brand.addView(mark, new LinearLayout.LayoutParams(dp(42), dp(42)));
         LinearLayout brandText = column(); brandText.setPadding(dp(12), 0, 0, 0);
         brandText.addView(label("DocumentVault", 17, ink(), true));
-        brandText.addView(label("ЛИЧНОЕ ХРАНИЛИЩЕ", 10, muted(), true));
+        brandText.addView(label("PRIVATE SPACE / ЛИЧНОЕ ХРАНИЛИЩЕ", 10, muted(), true));
         brand.addView(brandText); layout.addView(brand);
         space(layout, 34);
-        heroTitle = label("Документы\nпод защитой", 30, ink(), true); heroTitle.setLineSpacing(dp(2), 1f); layout.addView(heroTitle);
+        heroTitle = label("Документы\nпод защитой", 32, ink(), true); heroTitle.setLineSpacing(dp(2), 1f); layout.addView(heroTitle);
         space(layout, 8);
         heroSubtitle = label("Войдите, чтобы открыть своё хранилище.", 15, muted(), false); layout.addView(heroSubtitle);
         space(layout, 14); status = label("Укажите адрес сервера и войдите в аккаунт.", 13, muted(), false);
-        status.setPadding(dp(14), dp(12), dp(14), dp(12)); status.setBackground(round(Color.rgb(231, 239, 235), 14)); layout.addView(status);
+        status.setPadding(dp(14), dp(12), dp(14), dp(12)); status.setBackground(round(Color.rgb(225, 218, 250), 14)); layout.addView(status);
         space(layout, 20);
 
         loginPanel = card();
@@ -118,6 +122,7 @@ public final class MainActivity extends FragmentActivity {
         loginPanel.addView(label("Пароль", 12, ink(), true)); passwordField = field(loginPanel, "Пароль входа", true);
         button(loginPanel, "Войти", true, this::login);
         space(loginPanel, 8); button(loginPanel, "Создать аккаунт", false, this::showRegistration);
+        if (getSharedPreferences("session", MODE_PRIVATE).contains("data")) { space(loginPanel, 8); button(loginPanel, "Повторить сохранённый вход", false, this::restoreSession); }
         layout.addView(loginPanel);
 
         registerPanel = card(); registerPanel.addView(label("Новый аккаунт", 19, ink(), true));
@@ -162,7 +167,7 @@ public final class MainActivity extends FragmentActivity {
         space(vaultPanel, 2);
         LinearLayout section = new LinearLayout(this); section.setGravity(Gravity.CENTER_VERTICAL);
         TextView sectionTitle = label("Мои документы", 20, ink(), true); section.addView(sectionTitle, new LinearLayout.LayoutParams(0, -2, 1));
-        documentCount = label("0", 12, Color.rgb(26, 105, 91), true); documentCount.setGravity(Gravity.CENTER); documentCount.setBackground(round(Color.rgb(223, 240, 233), 20));
+        documentCount = label("0", 12, Color.rgb(45, 38, 69), true); documentCount.setGravity(Gravity.CENTER); documentCount.setBackground(round(Color.rgb(190, 245, 58), 20));
         section.addView(documentCount, new LinearLayout.LayoutParams(dp(34), dp(30))); vaultPanel.addView(section);
         space(vaultPanel, 12); documentList = column(); vaultPanel.addView(documentList);
         space(vaultPanel, 14); button(vaultPanel, "Обновить список", false, this::refresh);
@@ -173,30 +178,38 @@ public final class MainActivity extends FragmentActivity {
         space(layout, 18); TextView foot = label("Данные шифруются на устройстве", 12, muted(), false); foot.setGravity(Gravity.CENTER); layout.addView(foot);
         ScrollView scroll = new ScrollView(this); scroll.setFillViewport(true); scroll.addView(layout);
         android.widget.FrameLayout frame = new android.widget.FrameLayout(this); frame.addView(scroll);
-        progressPanel = new LinearLayout(this); progressPanel.setGravity(Gravity.CENTER_VERTICAL); progressPanel.setPadding(dp(16), dp(12), dp(16), dp(12)); progressPanel.setBackground(round(Color.rgb(22, 79, 71), 16));
+        progressPanel = new LinearLayout(this); progressPanel.setGravity(Gravity.CENTER_VERTICAL); progressPanel.setPadding(dp(16), dp(12), dp(16), dp(12)); progressPanel.setBackground(round(Color.rgb(25, 24, 34), 16));
         android.widget.ProgressBar spinner = new android.widget.ProgressBar(this); spinner.setIndeterminate(true); progressPanel.addView(spinner, new LinearLayout.LayoutParams(dp(28), dp(28)));
         progressText = label("", 14, Color.WHITE, true); progressText.setPadding(dp(12), 0, 0, 0); progressPanel.addView(progressText);
         android.widget.FrameLayout.LayoutParams progressParams = new android.widget.FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM); progressParams.setMargins(dp(16), 0, dp(16), dp(20)); frame.addView(progressPanel, progressParams); progressPanel.setVisibility(View.GONE); setContentView(frame);
-        renderDocuments(); updateScreen();
+        renderDocuments(); updateScreen(); restoreSession();
     }
     private int dp(float value) { return Math.round(value * getResources().getDisplayMetrics().density); }
-    private int ink() { return Color.rgb(26, 45, 41); }
-    private int muted() { return Color.rgb(105, 126, 118); }
+    private int ink() { return Color.rgb(25, 24, 34); }
+    private int muted() { return Color.rgb(100, 96, 117); }
     private GradientDrawable round(int color, int radius) { GradientDrawable drawable = new GradientDrawable(); drawable.setColor(color); drawable.setCornerRadius(dp(radius)); return drawable; }
     private LinearLayout column() { LinearLayout view = new LinearLayout(this); view.setOrientation(LinearLayout.VERTICAL); return view; }
     private LinearLayout card() { LinearLayout view = column(); view.setPadding(dp(20), dp(22), dp(20), dp(22)); view.setBackground(round(Color.WHITE, 22)); return view; }
     private TextView label(String text, int size, int color, boolean bold) { TextView view = new TextView(this); view.setText(text); view.setTextSize(size); view.setTextColor(color); if (bold) view.setTypeface(Typeface.DEFAULT, Typeface.BOLD); return view; }
     private void space(LinearLayout parent, int height) { parent.addView(new View(this), new LinearLayout.LayoutParams(1, dp(height))); }
     private EditText field(LinearLayout layout, String hint, boolean secret) {
-        EditText input = new EditText(this); input.setHint(hint); input.setSingleLine(true); input.setTextSize(15); input.setTextColor(ink()); input.setHintTextColor(Color.rgb(149, 165, 158));
-        input.setPadding(dp(14), 0, dp(14), 0); input.setBackground(round(Color.rgb(245, 248, 246), 12));
+        EditText input = new EditText(this); input.setHint(hint); input.setSingleLine(true); input.setTextSize(15); input.setTextColor(ink()); input.setHintTextColor(Color.rgb(144, 138, 158));
+        input.setPadding(dp(14), 0, dp(14), 0); input.setBackground(round(Color.rgb(242, 240, 250), 12));
         if (secret) input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, dp(50)); params.setMargins(0, dp(7), 0, dp(16)); layout.addView(input, params); return input;
     }
     private Button button(LinearLayout layout, String text, boolean primary, Runnable action) {
         Button button = new Button(this); button.setText(text); button.setTextSize(14); button.setAllCaps(false); button.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        button.setTextColor(primary ? Color.WHITE : Color.rgb(25, 86, 74)); button.setBackground(round(primary ? Color.rgb(22, 97, 81) : Color.rgb(226, 239, 232), 14));
+        button.setTextColor(primary ? Color.rgb(25, 24, 34) : Color.rgb(45, 38, 69)); button.setBackground(round(primary ? Color.rgb(190, 245, 58) : Color.rgb(228, 221, 249), 14));
         button.setElevation(0); button.setOnClickListener(v -> { if (!busy) action.run(); }); layout.addView(button, new LinearLayout.LayoutParams(-1, dp(52))); return button;
+    }
+    private void styleDialogField(EditText input) {
+        input.setTextSize(15); input.setTextColor(ink()); input.setHintTextColor(Color.rgb(120, 115, 137));
+        input.setPadding(dp(14), dp(10), dp(14), dp(10)); input.setBackground(round(Color.rgb(242, 240, 250), 12));
+    }
+    private void styleCompactButton(Button button) {
+        button.setAllCaps(false); button.setTextSize(14); button.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        button.setTextColor(Color.rgb(45, 38, 69)); button.setBackground(round(Color.rgb(228, 221, 249), 12)); button.setElevation(0);
     }
     private void updateScreen() {
         boolean loggedIn = token != null, unlocked = masterKey != null;
@@ -263,7 +276,8 @@ public final class MainActivity extends FragmentActivity {
             if (!query.isEmpty() && !OcrSearch.matches(name + " " + documentText.getOrDefault(id, ""), query)) continue;
             LinearLayout row = new LinearLayout(this); row.setPadding(dp(14), dp(14), dp(14), dp(14)); row.setGravity(Gravity.CENTER_VERTICAL); row.setBackground(round(Color.WHITE, 16));
             String type = name.toLowerCase(java.util.Locale.ROOT).endsWith(".pdf") ? "PDF" : "IMG";
-            TextView icon = label(type, 11, Color.rgb(23, 99, 81), true); icon.setGravity(Gravity.CENTER); icon.setBackground(round(Color.rgb(226, 240, 233), 12)); row.addView(icon, new LinearLayout.LayoutParams(dp(46), dp(46)));
+            if (id.equals(activeOcrId)) { android.widget.ProgressBar progress = new android.widget.ProgressBar(this); progress.setIndeterminate(true); progress.setContentDescription("Распознавание документа"); row.addView(progress, new LinearLayout.LayoutParams(dp(46), dp(46))); }
+            else { TextView icon = label(type, 11, Color.rgb(52, 41, 78), true); icon.setGravity(Gravity.CENTER); icon.setBackground(round(Color.rgb(228, 221, 249), 12)); row.addView(icon, new LinearLayout.LayoutParams(dp(46), dp(46))); }
             LinearLayout detail = column(); detail.setPadding(dp(12), 0, dp(8), 0); TextView title = label(name, 15, ink(), true); title.setMaxLines(1); title.setEllipsize(android.text.TextUtils.TruncateAt.END); detail.addView(title);
             String expiry = documentExpiry.get(id);
             String folder = documentFolders.getOrDefault(id, "");
@@ -274,13 +288,13 @@ public final class MainActivity extends FragmentActivity {
     }
     private void renderFolders() {
         folderBar.removeAllViews();
-        java.util.Set<String> names = new java.util.TreeSet<>(); names.addAll(documentFolders.values()); names.remove("");
+        java.util.Set<String> names = new java.util.TreeSet<>(savedFolders); names.addAll(documentFolders.values()); names.remove("");
         addFolderChip("Все", null); addFolderChip("Без папки", "");
         for (String name : names) addFolderChip(name, name);
     }
     private void addFolderChip(String title, String folder) {
-        TextView chip = label(title, 13, java.util.Objects.equals(selectedFolder, folder) ? Color.WHITE : Color.rgb(25, 86, 74), true);
-        chip.setPadding(dp(16), dp(10), dp(16), dp(10)); chip.setBackground(round(java.util.Objects.equals(selectedFolder, folder) ? Color.rgb(22, 97, 81) : Color.rgb(226, 239, 232), 16));
+        TextView chip = label(title, 13, java.util.Objects.equals(selectedFolder, folder) ? Color.rgb(25, 24, 34) : Color.rgb(45, 38, 69), true);
+        chip.setPadding(dp(16), dp(10), dp(16), dp(10)); chip.setBackground(round(java.util.Objects.equals(selectedFolder, folder) ? Color.rgb(190, 245, 58) : Color.rgb(228, 221, 249), 16));
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-2, -2); params.setMargins(0, 0, dp(8), 0); folderBar.addView(chip, params);
         chip.setOnClickListener(v -> { selectedFolder = folder; renderDocuments(); });
     }
@@ -290,18 +304,37 @@ public final class MainActivity extends FragmentActivity {
         String folder = documentFolders.getOrDefault(id, ""); String expiry = documentExpiry.get(id);
         content.addView(label((folder.isEmpty() ? "Без папки" : folder) + " · " + (expiry == null ? "Срок не указан" : "До " + expiry), 13, muted(), false)); space(content, 16);
         AlertDialog dialog = new AlertDialog.Builder(this).setView(content).create();
+        content.addView(label("ПРОСМОТР", 11, muted(), true)); space(content, 8);
         button(content, "Открыть документ", true, () -> { dialog.dismiss(); preview(id); }); space(content, 8);
         button(content, "Просмотр с текстом OCR", false, () -> { dialog.dismiss(); previewWithOcr(id); }); space(content, 8);
+        space(content, 8); content.addView(label("УПРАВЛЕНИЕ", 11, muted(), true)); space(content, 8);
         button(content, "Переименовать", false, () -> { dialog.dismiss(); renameDocument(id, name); }); space(content, 8);
         button(content, "Переместить в папку", false, () -> { dialog.dismiss(); moveToFolder(id); }); space(content, 8);
+        button(content, "Редактировать текст OCR", false, () -> { dialog.dismiss(); editRecognizedText(id, name); }); space(content, 8);
         button(content, "Распознать текст заново", false, () -> { dialog.dismiss(); reanalyze(id, true); }); space(content, 8);
         button(content, "Распознать без обрезки", false, () -> { dialog.dismiss(); reanalyze(id, false); }); space(content, 8);
         button(content, "Изменить срок", false, () -> { dialog.dismiss(); editExpiry(id); }); space(content, 8);
-        button(content, "Сохранить на устройство", false, () -> { dialog.dismiss(); download(id); });
+        button(content, "Сохранить на устройство", false, () -> { dialog.dismiss(); download(id); }); space(content, 16);
+        Button delete = button(content, "Удалить документ", false, () -> { dialog.dismiss(); confirmDelete(id, name); });
+        delete.setTextColor(Color.rgb(161, 48, 48)); delete.setBackground(round(Color.rgb(252, 235, 233), 14));
         ScrollView scroll = new ScrollView(this); scroll.addView(content); dialog.setView(scroll); dialog.show(); return dialog;
     }
+    private void confirmDelete(String id, String name) {
+        new AlertDialog.Builder(this).setTitle("Удалить документ?")
+            .setMessage("«" + name + "» будет удалён с сервера и станет недоступен на всех устройствах. Восстановить его не получится.")
+            .setNegativeButton("Отмена", null).setPositiveButton("Удалить", (dialog, which) -> deleteDocument(id)).show();
+    }
+    private void deleteDocument(String id) {
+        if (masterKey == null || token == null) return;
+        VaultApi selectedApi = api; String selectedToken = token, identity = accountIdentity;
+        runTask("Удаляем документ…", () -> {
+            selectedApi.delete(selectedToken, id);
+            try { if (identity != null) new ReminderStore(getApplicationContext()).put(identity, id, ""); return true; }
+            catch (Exception ignored) { return false; }
+        }, reminderRemoved -> refresh(reminderRemoved ? "Документ удалён." : "Документ удалён. Не удалось обновить напоминания."));
+    }
     private void renameDocument(String id, String oldName) {
-        EditText input = new EditText(this); input.setSingleLine(true); input.setText(oldName); input.selectAll();
+        EditText input = new EditText(this); styleDialogField(input); input.setSingleLine(true); input.setText(oldName); input.selectAll();
         AlertDialog dialog = new AlertDialog.Builder(this).setTitle("Переименовать документ").setView(input).setNegativeButton("Отмена", null).setPositiveButton("Сохранить", null).create();
         dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
             String name = input.getText().toString().trim();
@@ -341,7 +374,7 @@ public final class MainActivity extends FragmentActivity {
                     else if (value instanceof FileData) Arrays.fill(((FileData) value).content, (byte) 0);
                 });
             } catch (Exception e) {
-                runOnUiThread(() -> { busy = false; if (!isFinishing() && !isDestroyed()) { progressPanel.setVisibility(View.GONE); String error = "Ошибка: " + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()); status.setText(error); android.widget.Toast.makeText(this, error, android.widget.Toast.LENGTH_LONG).show(); } });
+                runOnUiThread(() -> { busy = false; activeOcrId = null; if (!isFinishing() && !isDestroyed()) { renderDocuments(); progressPanel.setVisibility(View.GONE); String error = "Ошибка: " + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()); status.setText(error); android.widget.Toast.makeText(this, error, android.widget.Toast.LENGTH_LONG).show(); } });
             }
         });
     }
@@ -353,15 +386,32 @@ public final class MainActivity extends FragmentActivity {
         String password = passwordField.getText().toString(); passwordField.setText("");
         runTask("Вход…", () -> {
             VaultApi selectedApi = new VaultApi(address);
-            return new LoginResult(selectedApi, selectedApi.login(username, password), address + "\u0000" + username.toLowerCase(java.util.Locale.ROOT));
-        }, result -> { rememberServer(address); api = result.api; token = result.token; accountIdentity = result.identity; updateScreen(); status.setText("Вход выполнен. Разблокируйте хранилище."); });
+            String newToken = selectedApi.login(username, password);
+            boolean saved; try { sessionStore.save(new SessionStore.Session(address, username, newToken)); saved = true; } catch (Exception e) { sessionStore.clear(); saved = false; }
+            return new LoginResult(selectedApi, newToken, address + "\u0000" + username.toLowerCase(java.util.Locale.ROOT), saved);
+        }, result -> { rememberServer(address); api = result.api; token = result.token; accountIdentity = result.identity; updateScreen(); status.setText(result.saved ? "Вход сохранён. Разблокируйте хранилище." : "Вход выполнен, но сохранить сессию не удалось."); });
     }
     private void rememberServer(String address) {
         if (address.regionMatches(true, 0, "https://", 0, 8)) getPreferences(MODE_PRIVATE).edit().putString("server_address", address).apply();
     }
     private static final class LoginResult {
-        final VaultApi api; final String token, identity;
-        LoginResult(VaultApi api, String token, String identity) { this.api = api; this.token = token; this.identity = identity; }
+        final VaultApi api; final String token, identity; final boolean saved;
+        LoginResult(VaultApi api, String token, String identity, boolean saved) { this.api = api; this.token = token; this.identity = identity; this.saved = saved; }
+    }
+    private void restoreSession() {
+        runTask("Восстанавливаем вход…", () -> {
+            SessionStore.Session saved;
+            try { saved = sessionStore.load(); } catch (Exception e) { sessionStore.clear(); return null; }
+            if (saved == null) return null;
+            VaultApi selectedApi = new VaultApi(saved.address);
+            try { selectedApi.list(saved.token); }
+            catch (VaultApi.HttpFailure e) { if (e.status == 401 || e.status == 403) { sessionStore.clear(); return null; } throw e; }
+            return new LoginResult(selectedApi, saved.token, saved.address + "\u0000" + saved.username.toLowerCase(java.util.Locale.ROOT), true);
+        }, result -> {
+            if (result == null) { status.setText("Войдите в аккаунт."); return; }
+            api = result.api; token = result.token; accountIdentity = result.identity; updateScreen();
+            status.setText("Вход восстановлен. Разблокируйте хранилище.");
+        });
     }
     private void unlock() {
         if (token == null) { status.setText("Сначала войдите в аккаунт."); return; }
@@ -375,10 +425,10 @@ public final class MainActivity extends FragmentActivity {
     private void logout() {
         if (token == null) return;
         VaultApi selectedApi = api; String selectedToken = token;
-        runTask("Выход…", () -> { selectedApi.logout(selectedToken); return true; }, ignored -> {
+        runTask("Выход…", () -> { boolean revoked; try { selectedApi.logout(selectedToken); revoked = true; } catch (Exception e) { revoked = false; } sessionStore.clear(); return revoked; }, revoked -> {
             if (masterKey != null) Arrays.fill(masterKey, (byte) 0);
-            masterKey = null; token = null; api = null; accountIdentity = null; documentIds = new String[0]; documentNames = new String[0]; documentExpiry.clear(); documentText.clear(); documentFolders.clear(); selectedFolder = null; searchField.setText("");
-            renderDocuments(); updateScreen(); status.setText("Вы вышли из аккаунта.");
+            masterKey = null; token = null; api = null; accountIdentity = null; documentIds = new String[0]; documentNames = new String[0]; documentExpiry.clear(); documentText.clear(); documentFolders.clear(); savedFolders.clear(); selectedFolder = null; searchField.setText("");
+            renderDocuments(); updateScreen(); status.setText(revoked ? "Вы вышли из аккаунта." : "Вы вышли на этом устройстве. Сервер не подтвердил завершение сессии.");
         });
     }
     private void refresh() { refresh(null); }
@@ -388,48 +438,55 @@ public final class MainActivity extends FragmentActivity {
         runTask("Обновляем документы…", () -> {
             try {
                 JSONArray list = selectedApi.list(selectedToken);
-                String[] ids = new String[list.length()], names = new String[list.length()];
+                java.util.List<String> idList = new java.util.ArrayList<>(), nameList = new java.util.ArrayList<>();
+                java.util.Set<String> saved = new java.util.TreeSet<>();
                 java.util.Map<String, String> dates = new java.util.HashMap<>();
                 java.util.Map<String, String> texts = new java.util.HashMap<>();
                 java.util.Map<String, String> folders = new java.util.HashMap<>();
                 for (int i = 0; i < list.length(); i++) {
-                    ids[i] = list.getJSONObject(i).getString("id"); names[i] = ids[i];
+                    String id = list.getJSONObject(i).getString("id"), name = id; boolean folderRecord = false;
                     if (key != null) {
-                        byte[] encrypted = selectedApi.metadata(selectedToken, ids[i]);
+                        byte[] encrypted = selectedApi.metadata(selectedToken, id);
                         if (encrypted != null) {
-                            byte[] plain = VaultCrypto.decrypt(key, encrypted, "metadata:" + ids[i]);
+                            byte[] plain = VaultCrypto.decrypt(key, encrypted, "metadata:" + id);
                             try { JSONObject data = new JSONObject(new String(plain, StandardCharsets.UTF_8));
-                                String name = data.optString("name", ""); if (!name.trim().isEmpty()) names[i] = name;
-                                String text = data.optString("text", ""); if (!text.isEmpty()) texts.put(ids[i], text);
-                                String folder = data.optString("folder", ""); if (!folder.isEmpty()) folders.put(ids[i], folder);
-                                String date = data.optString("expiry", ""); if (!date.isEmpty()) { java.time.LocalDate.parse(date); dates.put(ids[i], date); }
-                            }
-                            finally { Arrays.fill(plain, (byte) 0); }
+                                String folder = data.optString("folder", "");
+                                folderRecord = "documentvault.folder.v1".equals(data.optString("recordType", ""));
+                                if (folderRecord) { if (!folder.isEmpty()) saved.add(folder); }
+                                else {
+                                    String title = data.optString("name", ""); if (!title.trim().isEmpty()) name = title;
+                                    String text = data.optString("text", ""); if (!text.isEmpty()) texts.put(id, text);
+                                    if (!folder.isEmpty()) folders.put(id, folder);
+                                    String date = data.optString("expiry", ""); if (!date.isEmpty()) { java.time.LocalDate.parse(date); dates.put(id, date); }
+                                }
+                            } finally { Arrays.fill(plain, (byte) 0); }
                         }
                     }
+                    if (!folderRecord) { idList.add(id); nameList.add(name); }
                 }
+                String[] ids = idList.toArray(new String[0]), names = nameList.toArray(new String[0]);
                 boolean reminderError = false;
                 if (key != null && identity != null) try { new ReminderStore(getApplicationContext()).replaceAccount(identity, dates); } catch (Exception e) { reminderError = true; }
-                return new DocumentListing(ids, names, dates, texts, folders, reminderError);
+                return new DocumentListing(ids, names, dates, texts, folders, saved, reminderError);
             } finally { if (key != null) Arrays.fill(key, (byte) 0); }
         }, listing -> {
-            documentIds = listing.ids; documentNames = listing.names; documentExpiry.clear(); documentExpiry.putAll(listing.dates); documentText.clear(); documentText.putAll(listing.texts); documentFolders.clear(); documentFolders.putAll(listing.folders); renderDocuments();
+            documentIds = listing.ids; documentNames = listing.names; documentExpiry.clear(); documentExpiry.putAll(listing.dates); documentText.clear(); documentText.putAll(listing.texts); documentFolders.clear(); documentFolders.putAll(listing.folders); savedFolders.clear(); savedFolders.addAll(listing.savedFolders); renderDocuments();
             String resultMessage = completionMessage == null ? "Документы обновлены." : completionMessage;
             status.setText(listing.reminderError ? resultMessage + " Напоминания не обновлены." : resultMessage);
             if (!listing.reminderError && !listing.dates.isEmpty()) enableReminders();
         });
     }
     private static final class DocumentListing {
-        final String[] ids, names; final java.util.Map<String, String> dates, texts, folders; final boolean reminderError;
-        DocumentListing(String[] ids, String[] names, java.util.Map<String, String> dates, java.util.Map<String, String> texts, java.util.Map<String, String> folders, boolean reminderError) { this.ids = ids; this.names = names; this.dates = dates; this.texts = texts; this.folders = folders; this.reminderError = reminderError; }
+        final String[] ids, names; final java.util.Map<String, String> dates, texts, folders; final java.util.Set<String> savedFolders; final boolean reminderError;
+        DocumentListing(String[] ids, String[] names, java.util.Map<String, String> dates, java.util.Map<String, String> texts, java.util.Map<String, String> folders, java.util.Set<String> savedFolders, boolean reminderError) { this.ids = ids; this.names = names; this.dates = dates; this.texts = texts; this.folders = folders; this.savedFolders = savedFolders; this.reminderError = reminderError; }
     }
     private void moveToFolder(String id) {
         if (masterKey == null || token == null) return;
-        java.util.Set<String> existing = new java.util.TreeSet<>(); existing.addAll(documentFolders.values()); existing.remove("");
+        java.util.Set<String> existing = new java.util.TreeSet<>(savedFolders); existing.addAll(documentFolders.values()); existing.remove("");
         java.util.List<String> choices = new java.util.ArrayList<>(); choices.add("Без папки"); choices.addAll(existing); choices.add("+ Новая папка");
         new AlertDialog.Builder(this).setTitle("Переместить документ").setItems(choices.toArray(new String[0]), (dialog, which) -> {
             if (which == choices.size() - 1) {
-                EditText input = new EditText(this); input.setSingleLine(true); input.setHint("Название папки");
+                EditText input = new EditText(this); styleDialogField(input); input.setSingleLine(true); input.setHint("Название папки");
                 new AlertDialog.Builder(this).setTitle("Новая папка").setView(input).setNegativeButton("Отмена", null).setPositiveButton("Переместить", (d, w) -> {
                     String value = input.getText().toString().trim();
                     if (value.isEmpty() || value.length() > 80 || value.contains("/") || value.contains("\\")) { status.setText("Название папки: от 1 до 80 символов, без слешей."); return; }
@@ -456,7 +513,7 @@ public final class MainActivity extends FragmentActivity {
     }
     private void editExpiry(String id) {
         if (masterKey == null || token == null) { status.setText("Сначала разблокируйте хранилище."); return; }
-        EditText input = new EditText(this); input.setSingleLine(true); input.setHint("ГГГГ-ММ-ДД"); input.setText(documentExpiry.getOrDefault(id, ""));
+        EditText input = new EditText(this); styleDialogField(input); input.setSingleLine(true); input.setHint("ГГГГ-ММ-ДД"); input.setText(documentExpiry.getOrDefault(id, ""));
         new AlertDialog.Builder(this).setTitle("Срок действия").setMessage("Введите дату в формате ГГГГ-ММ-ДД или очистите поле.")
             .setView(input).setNegativeButton("Отмена", null).setPositiveButton("Сохранить", (dialog, which) -> {
                 String expiry = input.getText().toString().trim();
@@ -627,7 +684,7 @@ public final class MainActivity extends FragmentActivity {
             } finally { Arrays.fill(key, (byte) 0); if (file != null) Arrays.fill(file, (byte) 0); if (payload != null) Arrays.fill(payload, (byte) 0); if (temporaryCapture != null) temporaryCapture.delete(); }
         }, result -> {
             status.setText(result.message);
-            if (result.text != null) confirmOcr(result); else refresh(result.message);
+            if (result.text != null) saveRecognizedAutomatically(result); else refresh(result.message);
         });
     }
     private static final class UploadResult {
@@ -636,6 +693,7 @@ public final class MainActivity extends FragmentActivity {
         UploadResult(String id, String name, String text, String message, String layout) { this.id = id; this.name = name; this.text = text; this.message = message; this.layout = layout; }
     }
     private void reanalyze(String id, boolean detectPage) {
+        activeOcrId = id; renderDocuments();
         loadFile(id, file -> runTask("Распознаём текст…", () -> {
             try {
                 boolean pdf = file.name.toLowerCase(java.util.Locale.ROOT).endsWith(".pdf");
@@ -643,25 +701,46 @@ public final class MainActivity extends FragmentActivity {
                 LocalOcr.ImageResult result = LocalOcr.recognizeImage(getApplicationContext(), file.content, detectPage);
                 return new UploadResult(id, file.name, result.text, result.cropped ? "Границы документа найдены. Проверьте результат." : detectPage ? "Границы не найдены: распознано исходное фото." : "Распознано исходное фото без обрезки.", result.layout.toString());
             } finally { Arrays.fill(file.content, (byte) 0); }
-        }, this::confirmOcr));
+        }, this::saveRecognizedAutomatically));
+    }
+    private void editRecognizedText(String id, String name) {
+        if (masterKey == null || token == null) return;
+        byte[] key = masterKey.clone(); VaultApi selectedApi = api; String selectedToken = token;
+        runTask("Загружаем текст…", () -> {
+            byte[] plain = null;
+            try {
+                byte[] encrypted = selectedApi.metadata(selectedToken, id);
+                if (encrypted == null) throw new IllegalStateException("Сначала распознайте документ.");
+                plain = VaultCrypto.decrypt(key, encrypted, "metadata:" + id);
+                JSONObject metadata = new JSONObject(new String(plain, StandardCharsets.UTF_8));
+                JSONObject layout = metadata.optJSONObject("ocrLayout");
+                return new UploadResult(id, name, metadata.optString("text", ""), "Исправьте текст и при необходимости срок действия.", layout == null ? null : layout.toString());
+            } finally { Arrays.fill(key, (byte) 0); if (plain != null) Arrays.fill(plain, (byte) 0); }
+        }, this::confirmOcr);
+    }
+    private void saveRecognizedAutomatically(UploadResult result) {
+        java.time.LocalDate detected = DateSuggestions.findExpiry(result.text);
+        String previous = documentExpiry.getOrDefault(result.id, "");
+        String expiry = previous.isEmpty() && detected != null ? detected.toString() : previous;
+        saveOcr(result, expiry);
     }
     private AlertDialog confirmOcr(UploadResult result) {
         LinearLayout content = new LinearLayout(this); content.setOrientation(LinearLayout.VERTICAL); content.setPadding(24, 12, 24, 12);
         TextView scanStatus = new TextView(this); scanStatus.setText(result.message); content.addView(scanStatus);
         java.util.List<java.time.LocalDate> dates = DateSuggestions.find(result.text);
         TextView label = new TextView(this); label.setText("Выберите срок или укажите его вручную в формате ГГГГ-ММ-ДД. Если при правке изменится число слов, наложение потребуется создать заново."); content.addView(label);
-        EditText expiry = new EditText(this); expiry.setHint("ГГГГ-ММ-ДД"); expiry.setSingleLine(true); expiry.setText(documentExpiry.getOrDefault(result.id, "")); content.addView(expiry);
+        EditText expiry = new EditText(this); styleDialogField(expiry); expiry.setHint("ГГГГ-ММ-ДД"); expiry.setSingleLine(true); expiry.setText(documentExpiry.getOrDefault(result.id, "")); content.addView(expiry);
         if (!dates.isEmpty()) {
             HorizontalScrollView dateScroll = new HorizontalScrollView(this);
             LinearLayout choices = new LinearLayout(this); choices.setOrientation(LinearLayout.HORIZONTAL);
             for (int i = 0; i < Math.min(dates.size(), 12); i++) {
-                String value = dates.get(i).toString(); Button choice = new Button(this); choice.setText(value);
+                String value = dates.get(i).toString(); Button choice = new Button(this); styleCompactButton(choice); choice.setText(value);
                 choice.setOnClickListener(view -> expiry.setText(value)); choices.addView(choice);
             }
             dateScroll.addView(choices); content.addView(dateScroll);
             if (dates.size() > 12) { TextView more = new TextView(this); more.setText("Показаны первые 12 дат. Другую дату можно ввести вручную."); content.addView(more); }
         }
-        EditText text = new EditText(this); text.setText(result.text); text.setGravity(Gravity.TOP | Gravity.START); text.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES); content.addView(text, new LinearLayout.LayoutParams(-1, dp(180)));
+        EditText text = new EditText(this); styleDialogField(text); text.setText(result.text); text.setGravity(Gravity.TOP | Gravity.START); text.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES); content.addView(text, new LinearLayout.LayoutParams(-1, dp(180)));
         AlertDialog dialog = new AlertDialog.Builder(this).setTitle("Проверьте результат OCR").setView(content)
             .setNegativeButton("Не сохранять", (ignoredDialog, which) -> refresh("Текст OCR не сохранён."))
             .setPositiveButton("Сохранить", null).create();
@@ -690,9 +769,9 @@ public final class MainActivity extends FragmentActivity {
                 selectedApi.saveMetadata(selectedToken, result.id, VaultCrypto.encrypt(key, bytes, "metadata:" + result.id));
                 if (identity != null) try { new ReminderStore(getApplicationContext()).put(identity, result.id, expiry); }
                     catch (Exception e) { return "Данные сохранены, но напоминание не настроено."; }
-                return "Распознанный текст и срок сохранены в зашифрованном виде.";
+                return expiry.isEmpty() ? "Текст сохранён. Срок действия автоматически не найден." : "Текст сохранён. Срок действия: " + expiry + ". Проверьте его в документе.";
             } finally { Arrays.fill(key, (byte) 0); if (bytes != null) Arrays.fill(bytes, (byte) 0); if (plain != null) Arrays.fill(plain, (byte) 0); }
-        }, message -> { if (!expiry.isEmpty() && !message.contains("не настроено")) enableReminders(); refresh(message); });
+        }, message -> { activeOcrId = null; renderDocuments(); if (!expiry.isEmpty() && !message.contains("не настроено")) enableReminders(); refresh(message); });
     }
     private void chooseDocument() {
         if (token == null || masterKey == null) { status.setText("Войдите и разблокируйте хранилище."); return; }
@@ -711,6 +790,7 @@ public final class MainActivity extends FragmentActivity {
     private void preview(String id) { loadFile(id, this::showPreview); }
     private void previewWithOcr(String id) {
         if (masterKey == null || token == null) return;
+        activeOcrId = id; renderDocuments();
         loadFile(id, file -> {
             if (masterKey == null || token == null) { Arrays.fill(file.content, (byte) 0); return; }
             byte[] key = masterKey.clone(); VaultApi selectedApi = api; String selectedToken = token;
@@ -720,13 +800,13 @@ public final class MainActivity extends FragmentActivity {
                 if (file.name.toLowerCase(java.util.Locale.ROOT).endsWith(".pdf")) throw new IllegalArgumentException("Наложение OCR пока доступно для изображений.");
                 byte[] encrypted = selectedApi.metadata(selectedToken, id);
                 if (encrypted == null) throw new IllegalArgumentException("Сначала распознайте документ заново.");
-                plain = VaultCrypto.decrypt(key, encrypted, "metadata:" + id); JSONObject layout = new JSONObject(new String(plain, StandardCharsets.UTF_8)).optJSONObject("ocrLayout");
+                plain = VaultCrypto.decrypt(key, encrypted, "metadata:" + id); JSONObject metadata = new JSONObject(new String(plain, StandardCharsets.UTF_8)); JSONObject layout = metadata.optJSONObject("ocrLayout");
                 if (layout == null || layout.optJSONArray("words") == null || layout.optJSONArray("words").length() == 0) throw new IllegalArgumentException("Нет координат текста. Распознайте документ заново и сохраните без правок.");
                 image = LocalOcr.decodeImage(file.content); overlay = OcrOverlay.render(image, layout);
                 ByteArrayOutputStream output = new ByteArrayOutputStream(); if (!overlay.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, output)) throw new IllegalStateException("Не удалось подготовить просмотр.");
-                return new FileData("Распознанный текст.png", output.toByteArray());
+                return new FileData("Распознанный текст.png", output.toByteArray(), metadata.optString("text", ""));
             } finally { Arrays.fill(key, (byte) 0); Arrays.fill(file.content, (byte) 0); if (plain != null) Arrays.fill(plain, (byte) 0); if (image != null) image.recycle(); if (overlay != null) overlay.recycle(); }
-            }, this::showPreview);
+            }, preview -> { activeOcrId = null; renderDocuments(); showPreview(preview); });
         });
     }
     private void loadFile(String id, Done<FileData> done) {
@@ -766,11 +846,23 @@ public final class MainActivity extends FragmentActivity {
             android.graphics.Bitmap image;
             try { image = LocalOcr.orientBitmap(decoded, orientation); } catch (Throwable e) { decoded.recycle(); throw e; }
             if (image != decoded) decoded.recycle();
-            ImageView view = new ImageView(this); view.setImageBitmap(image); view.setAdjustViewBounds(true); view.setScaleType(ImageView.ScaleType.FIT_CENTER);
-            previewDialog = new AlertDialog.Builder(this).setTitle(file.name).setView(view).setPositiveButton("Закрыть", null).create();
-            previewDialog.setOnDismissListener(d -> { view.setImageDrawable(null); image.recycle(); previewDialog = null; }); previewDialog.show();
+            ZoomImageView view = new ZoomImageView(this); view.setImageBitmap(image);
+            LinearLayout content = column(); content.addView(view, new LinearLayout.LayoutParams(-1, dp(file.ocrText == null ? 430 : 250))); addZoomControls(content, view);
+            TextView[] ocrTextView = {null};
+            if (file.ocrText != null) { TextView selectable = label(file.ocrText, 14, ink(), false); ocrTextView[0] = selectable; selectable.setTextIsSelectable(true); selectable.setPadding(dp(12), dp(10), dp(12), dp(10)); selectable.setBackground(round(Color.rgb(242, 240, 250), 12));
+                ScrollView textScroll = new ScrollView(this); textScroll.addView(selectable); content.addView(label("Распознанный текст · выделите для копирования", 12, muted(), true)); content.addView(textScroll, new LinearLayout.LayoutParams(-1, dp(110))); }
+            previewDialog = new AlertDialog.Builder(this).setTitle(file.name).setView(content).setPositiveButton("Закрыть", null).create();
+            previewDialog.setOnDismissListener(d -> { view.setImageDrawable(null); if (ocrTextView[0] != null) ocrTextView[0].setText(""); image.recycle(); previewDialog = null; }); previewDialog.show();
         } catch (Exception e) { status.setText("Просмотр: " + e.getMessage()); }
         finally { Arrays.fill(file.content, (byte) 0); }
+    }
+    private void addZoomControls(LinearLayout content, ZoomImageView image) {
+        LinearLayout controls = new LinearLayout(this); controls.setGravity(Gravity.CENTER);
+        Button out = new Button(this); styleCompactButton(out); out.setText("−"); out.setContentDescription("Уменьшить документ");
+        Button reset = new Button(this); styleCompactButton(reset); reset.setText("По размеру экрана");
+        Button in = new Button(this); styleCompactButton(in); in.setText("+"); in.setContentDescription("Увеличить документ");
+        out.setOnClickListener(v -> image.zoomOut()); reset.setOnClickListener(v -> image.resetZoom()); in.setOnClickListener(v -> image.zoomIn());
+        controls.addView(out, new LinearLayout.LayoutParams(0, dp(48), 1)); controls.addView(reset, new LinearLayout.LayoutParams(0, dp(48), 3)); controls.addView(in, new LinearLayout.LayoutParams(0, dp(48), 1)); content.addView(controls);
     }
     private void showPdfPreview(FileData file) throws Exception {
         File directory = new File(getCacheDir(), "preview");
@@ -783,9 +875,9 @@ public final class MainActivity extends FragmentActivity {
             renderer = new android.graphics.pdf.PdfRenderer(descriptor);
             if (renderer.getPageCount() < 1) throw new IllegalArgumentException("PDF не содержит страниц.");
             final android.os.ParcelFileDescriptor opened = descriptor; final android.graphics.pdf.PdfRenderer pdf = renderer;
-            LinearLayout content = column(); ImageView image = new ImageView(this); image.setScaleType(ImageView.ScaleType.FIT_CENTER);
-            content.addView(image, new LinearLayout.LayoutParams(-1, dp(430))); TextView pageLabel = label("", 14, muted(), true); pageLabel.setGravity(Gravity.CENTER); content.addView(pageLabel);
-            LinearLayout controls = new LinearLayout(this); Button previous = new Button(this), next = new Button(this); previous.setText("Назад"); next.setText("Далее");
+            LinearLayout content = column(); ZoomImageView image = new ZoomImageView(this);
+            content.addView(image, new LinearLayout.LayoutParams(-1, dp(430))); addZoomControls(content, image); TextView pageLabel = label("", 14, muted(), true); pageLabel.setGravity(Gravity.CENTER); content.addView(pageLabel);
+            LinearLayout controls = new LinearLayout(this); Button previous = new Button(this), next = new Button(this); styleCompactButton(previous); styleCompactButton(next); previous.setText("Назад"); next.setText("Далее");
             controls.addView(previous, new LinearLayout.LayoutParams(0, -2, 1)); controls.addView(next, new LinearLayout.LayoutParams(0, -2, 1)); content.addView(controls);
             int[] page = {0}; android.graphics.Bitmap[] shown = {null};
             Runnable render = () -> { try (android.graphics.pdf.PdfRenderer.Page current = pdf.openPage(page[0])) {
@@ -802,8 +894,9 @@ public final class MainActivity extends FragmentActivity {
         } catch (Exception e) { if (renderer != null) renderer.close(); if (descriptor != null) try { descriptor.close(); } catch (java.io.IOException ignored) { } temporary.delete(); throw e; }
     }
     private static final class FileData {
-        final String name; final byte[] content;
-        FileData(String name, byte[] content) { this.name = name; this.content = content; }
+        final String name, ocrText; final byte[] content;
+        FileData(String name, byte[] content) { this(name, content, null); }
+        FileData(String name, byte[] content, String ocrText) { this.name = name; this.content = content; this.ocrText = ocrText; }
     }
     private String fileName(Uri uri) {
         try (Cursor cursor = getContentResolver().query(uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
@@ -819,6 +912,6 @@ public final class MainActivity extends FragmentActivity {
             return out.toByteArray();
         }
     }
-    private void lock() { if (previewDialog != null) previewDialog.dismiss(); if (masterKey != null) Arrays.fill(masterKey, (byte) 0); if (pendingDocument != null) Arrays.fill(pendingDocument, (byte) 0); masterKey = null; pendingDocument = null; documentIds = new String[0]; documentNames = new String[0]; documentExpiry.clear(); documentText.clear(); documentFolders.clear(); selectedFolder = null; searchField.setText(""); renderDocuments(); updateScreen(); status.setText("Хранилище заблокировано."); }
+    private void lock() { if (previewDialog != null) previewDialog.dismiss(); if (masterKey != null) Arrays.fill(masterKey, (byte) 0); if (pendingDocument != null) Arrays.fill(pendingDocument, (byte) 0); masterKey = null; pendingDocument = null; activeOcrId = null; documentIds = new String[0]; documentNames = new String[0]; documentExpiry.clear(); documentText.clear(); documentFolders.clear(); savedFolders.clear(); selectedFolder = null; searchField.setText(""); renderDocuments(); updateScreen(); status.setText("Хранилище заблокировано."); }
     @Override protected void onDestroy() { if (previewDialog != null) previewDialog.dismiss(); if (masterKey != null) Arrays.fill(masterKey, (byte) 0); if (pendingDocument != null) Arrays.fill(pendingDocument, (byte) 0); masterKey = null; pendingDocument = null; token = null; executor.shutdownNow(); super.onDestroy(); }
 }
