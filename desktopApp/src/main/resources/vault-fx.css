@@ -66,7 +66,15 @@
 .app .scroll-bar .thumb { -fx-background-color: #55596a; -fx-background-radius: 6; }
 .app .scroll-bar .increment-button, .app .scroll-bar .decrement-button { -fx-background-color: transparent; }
 .app:light .scroll-bar .thumb { -fx-background-color: #b6b2c5; }
-.app .folder-tile { -fx-background-color: #292b39; -fx-text-fill: #e2d6ff; -fx-padding: 14px 18px; -fx-min-width: 170px; -fx-alignment: center-left; -fx-border-color: #4d4862; -fx-border-radius: 8px; }
+.app .folder-tile { -fx-background-color: #292b39; -fx-text-fill: #e2d6ff; -fx-padding: 16px 18px; -fx-min-width: 145px; -fx-pref-width: 145px; -fx-min-height: 100px; -fx-alignment: center; -fx-border-color: #4d4862; -fx-border-radius: 8px; }
 .app .folder-tile:hover { -fx-background-color: #3a3b4d; }
 .app:light .folder-tile { -fx-background-color: #f0ecf9; -fx-text-fill: #4b326d; -fx-border-color: #d3c9e6; }
 .app:light .folder-tile:hover { -fx-background-color: #e3daf5; }
+.app .folder-icon { -fx-fill: #c8ff45; -fx-stroke: #a8d63c; -fx-stroke-width: 1; }
+.app:light .folder-icon { -fx-fill: #9acb2c; -fx-stroke: #62850e; }
+.app .file-icon { -fx-fill: #343949; -fx-stroke: #c7b4ff; -fx-stroke-width: 1.2; }
+.app:light .file-icon { -fx-fill: #e8e2f5; -fx-stroke: #6b5194; }
+.app .list-cell:filled { -fx-background-color: #222630; -fx-background-radius: 8px; -fx-background-insets: 3 0; -fx-graphic-text-gap: 14px; }
+.app:light .list-cell:filled { -fx-background-color: #f1eff7; }
+.app .list-cell:filled:selected { -fx-background-color: #373846; }
+.app:light .list-cell:filled:selected { -fx-background-color: #ded7f4; }

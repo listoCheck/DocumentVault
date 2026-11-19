@@ -80,17 +80,28 @@ public final class DevicePreviewTest {
         android.graphics.Bitmap image = android.graphics.Bitmap.createBitmap(500, 700, android.graphics.Bitmap.Config.ARGB_8888); image.eraseColor(android.graphics.Color.WHITE);
         ByteArrayOutputStream bytes = new ByteArrayOutputStream(); image.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, bytes); image.recycle();
         Class<?> dataClass = Class.forName("ru.documentvault.android.MainActivity$FileData");
-        java.lang.reflect.Constructor<?> constructor = dataClass.getDeclaredConstructor(String.class, byte[].class, String.class); constructor.setAccessible(true);
-        Object data = constructor.newInstance("ocr.png", bytes.toByteArray(), "Пример распознанного текста");
+        java.lang.reflect.Constructor<?> constructor = dataClass.getDeclaredConstructor(String.class, byte[].class, String.class, String.class); constructor.setAccessible(true);
+        Object data = constructor.newInstance("ocr.png", bytes.toByteArray(), "Пример текста", "{\"version\":1,\"words\":[[\"Пример\",0.1,0.2,0.4,0.3],[\"текста\",0.45,0.2,0.8,0.3]]}");
         java.lang.reflect.Method show = MainActivity.class.getDeclaredMethod("showPreview", dataClass); show.setAccessible(true);
         java.lang.reflect.Field dialog = MainActivity.class.getDeclaredField("previewDialog"); dialog.setAccessible(true);
         try {
             runner.runOnMainSync(() -> { try { show.invoke(activity, data); } catch (ReflectiveOperationException e) { throw new AssertionError(e); } });
             runner.waitForIdleSync();
+            AtomicReference<ZoomImageView> zoomRef = new AtomicReference<>(); float[] points = {100, 175, 300, 175};
+            long down = android.os.SystemClock.uptimeMillis();
             runner.runOnMainSync(() -> { try {
-                AlertDialog d = (AlertDialog) dialog.get(activity); TextView text = (TextView) find(d.getWindow().getDecorView(), "Пример распознанного текста");
-                assertNotNull(text); assertTrue("OCR text must allow selection and copying", text.isTextSelectable()); d.dismiss();
+                AlertDialog d = (AlertDialog) dialog.get(activity); ZoomImageView view = findZoom(d.getWindow().getDecorView()); assertNotNull(view); zoomRef.set(view);
+                view.getImageMatrix().mapPoints(points);
+                android.view.MotionEvent event = android.view.MotionEvent.obtain(down, down, android.view.MotionEvent.ACTION_DOWN, points[0], points[1], 0); view.dispatchTouchEvent(event); event.recycle();
             } catch (IllegalAccessException e) { throw new AssertionError(e); } });
+            Thread.sleep(android.view.ViewConfiguration.getLongPressTimeout() + 250L);
+            runner.runOnMainSync(() -> {
+                ZoomImageView view = zoomRef.get();
+                android.view.MotionEvent event = android.view.MotionEvent.obtain(down, android.os.SystemClock.uptimeMillis(), android.view.MotionEvent.ACTION_MOVE, points[2], points[3], 0); view.dispatchTouchEvent(event); event.recycle();
+                assertEquals("Пример текста", view.selectedText());
+                event = android.view.MotionEvent.obtain(down, android.os.SystemClock.uptimeMillis(), android.view.MotionEvent.ACTION_UP, points[2], points[3], 0); view.dispatchTouchEvent(event); event.recycle();
+                try { ((AlertDialog) dialog.get(activity)).dismiss(); } catch (IllegalAccessException e) { throw new AssertionError(e); }
+            });
         } finally { activity.finish(); }
     }
     private static void pinchOut(ZoomImageView view) {

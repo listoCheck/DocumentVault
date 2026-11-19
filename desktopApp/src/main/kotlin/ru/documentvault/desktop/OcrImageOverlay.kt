@@ -31,25 +31,29 @@ object OcrImageOverlay {
                     val bottom = (xy[3] * output.height).roundToInt().coerceIn(top + 1, output.height)
                     TextBox(word[0].asText().take(200), left, top, right, bottom)
                 }
+                val heights = boxes.filter { it.value.isNotBlank() }.map { it.bottom - it.top }.sorted()
+                val commonHeight = if (heights.isEmpty()) 1 else heights[heights.size / 2]
+                val referenceFont = Font("SansSerif", Font.PLAIN, 100)
+                val referenceHeight = referenceFont.createGlyphVector(graphics.fontRenderContext, "Н").visualBounds.height.coerceAtLeast(1.0)
+                val uniformFont = referenceFont.deriveFont((100.0 * commonHeight * 0.92 / referenceHeight).toFloat().coerceAtLeast(1f))
                 graphics.color = Color(224, 226, 225)
                 for (box in boxes) {
+                    if (box.value.isBlank()) continue
                     val height = box.bottom - box.top; val padX = (height * 0.08).roundToInt().coerceIn(1, 3); val padY = (height * 0.15).roundToInt().coerceIn(1, 4)
-                    val left = (box.left - padX).coerceAtLeast(0); val top = (box.top - padY).coerceAtLeast(0)
-                    graphics.fillRect(left, top, (box.right + padX).coerceAtMost(output.width) - left, (box.bottom + padY).coerceAtMost(output.height) - top)
+                    val centerY = (box.top + box.bottom) / 2; val coverHeight = maxOf(height, commonHeight)
+                    val left = (box.left - padX).coerceAtLeast(0); val top = (centerY - coverHeight / 2 - padY).coerceAtLeast(0)
+                    val bottom = (centerY + (coverHeight + 1) / 2 + padY).coerceAtMost(output.height)
+                    graphics.fillRect(left, top, (box.right + padX).coerceAtMost(output.width) - left, bottom - top)
                 }
                 for (box in boxes) {
                     if (box.value.isEmpty()) continue
                     val width = box.right - box.left; val height = box.bottom - box.top
-                    var font = Font("SansSerif", Font.PLAIN, 100)
-                    var glyph = font.createGlyphVector(graphics.fontRenderContext, box.value)
-                    val original = glyph.visualBounds; if (original.height <= 0.0) continue
-                    font = font.deriveFont((100.0 * height * 0.96 / original.height).toFloat().coerceAtLeast(1f))
-                    glyph = font.createGlyphVector(graphics.fontRenderContext, box.value)
+                    val glyph = uniformFont.createGlyphVector(graphics.fontRenderContext, box.value)
                     val visual = glyph.visualBounds; if (visual.width <= 0.0 || visual.height <= 0.0) continue
                     val horizontalScale = minOf(1.0, width / visual.width)
                     val painter = graphics.create() as java.awt.Graphics2D
                     try {
-                        painter.clipRect(box.left, box.top, width, height); painter.translate(box.left.toDouble(), box.top.toDouble()); painter.scale(horizontalScale, 1.0)
+                        painter.translate(box.left.toDouble(), box.top.toDouble()); painter.scale(horizontalScale, 1.0)
                         painter.color = Color.BLACK
                         painter.drawGlyphVector(glyph, (-visual.x).toFloat(), ((height - visual.height) / 2.0 - visual.y).toFloat())
                     } finally { painter.dispose() }

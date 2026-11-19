@@ -16,6 +16,13 @@ import static org.junit.Assert.*;
 
 @RunWith(AndroidJUnit4.class)
 public final class DeviceDocumentScanTest {
+    @Test public void distinguishesBlueInkFromBlackText() {
+        Bitmap image = Bitmap.createBitmap(200, 100, Bitmap.Config.ARGB_8888); image.eraseColor(Color.rgb(160, 160, 160));
+        android.graphics.Canvas canvas = new android.graphics.Canvas(image); android.graphics.Paint paint = new android.graphics.Paint();
+        paint.setColor(Color.rgb(40, 55, 100)); canvas.drawRect(10, 10, 40, 40, paint); canvas.drawRect(110, 10, 113, 40, paint);
+        paint.setColor(Color.rgb(25, 25, 25)); canvas.drawRect(120, 10, 150, 40, paint);
+        try { assertTrue(ColoredInk.mostlyBlue(image, new int[]{0, 0, 50, 50})); assertFalse(ColoredInk.mostlyBlue(image, new int[]{100, 0, 160, 50})); } finally { image.recycle(); }
+    }
     @Test public void detectsPerspectiveAndKeepsOriginal() throws Exception {
         Bitmap image = Bitmap.createBitmap(1200, 1000, Bitmap.Config.ARGB_8888); Canvas canvas = new Canvas(image); canvas.drawColor(Color.DKGRAY);
         Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG); paint.setColor(Color.WHITE); Path page = new Path();
@@ -67,7 +74,7 @@ public final class DeviceDocumentScanTest {
             .put(new JSONArray().put("DOCUMENT").put(0.5).put(0.5).put(0.9).put(0.9)));
         Bitmap rendered = OcrOverlay.render(source, layout);
         try {
-            assertEquals(Color.rgb(224, 226, 225), rendered.getPixel(30, 20));
+            assertEquals(Color.RED, rendered.getPixel(30, 20));
             assertEquals(Color.RED, rendered.getPixel(2, 2));
             boolean dark = false;
             for (int y = 50; y < 90 && !dark; y++) for (int x = 100; x < 180; x++) if (Color.red(rendered.getPixel(x, y)) < 40) { dark = true; break; }

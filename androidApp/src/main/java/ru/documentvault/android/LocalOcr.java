@@ -52,8 +52,14 @@ public final class LocalOcr {
             try {
                 java.util.List<RecognizedWord> found = new java.util.ArrayList<>();
                 for (int mode : new int[]{TessBaseAPI.PageSegMode.PSM_AUTO, TessBaseAPI.PageSegMode.PSM_SPARSE_TEXT}) {
-                    tess.setPageSegMode(mode); recognizeBest(tess, prepared); collectWords(tess, prepared, found);
+                    tess.setPageSegMode(mode); tess.setImage(prepared); tess.getUTF8Text(); collectWords(tess, prepared, scan.image, found);
                 }
+                Bitmap adaptive = adaptiveImage(prepared);
+                if (adaptive != null) try {
+                    for (int mode : new int[]{TessBaseAPI.PageSegMode.PSM_AUTO, TessBaseAPI.PageSegMode.PSM_SPARSE_TEXT}) {
+                        tess.setPageSegMode(mode); tess.setImage(adaptive); tess.getUTF8Text(); collectWords(tess, adaptive, scan.image, found);
+                    }
+                } finally { adaptive.recycle(); }
                 tess.setPageSegMode(TessBaseAPI.PageSegMode.PSM_AUTO);
                 found.sort((left, right) -> Double.compare(left.centerY(), right.centerY()));
                 java.util.List<java.util.List<RecognizedWord>> lines = new java.util.ArrayList<>();
@@ -99,17 +105,28 @@ public final class LocalOcr {
         double minimumArea = Math.min((double) (a[2]-a[0]) * (a[3]-a[1]), (double) (b[2]-b[0]) * (b[3]-b[1]));
         return minimumArea > 0 && width * (double) height / minimumArea >= 0.6;
     }
-    private static void collectWords(TessBaseAPI tess, Bitmap image, java.util.List<RecognizedWord> found) {
+    private static void collectWords(TessBaseAPI tess, Bitmap image, Bitmap colorImage, java.util.List<RecognizedWord> found) {
         com.googlecode.tesseract.android.ResultIterator it = tess.getResultIterator(); if (it == null) return;
         try {
             it.begin(); int level = TessBaseAPI.PageIteratorLevel.RIL_WORD;
             do {
                 String value = it.getUTF8Text(level); int[] box = it.getBoundingBox(level);
                 if (value == null || value.trim().isEmpty() || box == null || box.length != 4 || box[0] < 0 || box[1] < 0 || box[2] > image.getWidth() || box[3] > image.getHeight() || box[2] <= box[0] || box[3] <= box[1]) continue;
+                int[] colorBox = {(int) ((long) box[0] * colorImage.getWidth() / image.getWidth()), (int) ((long) box[1] * colorImage.getHeight() / image.getHeight()),
+                    (int) Math.ceil((double) box[2] * colorImage.getWidth() / image.getWidth()), (int) Math.ceil((double) box[3] * colorImage.getHeight() / image.getHeight())};
+                if (ColoredInk.mostlyBlue(colorImage, colorBox)) continue;
                 RecognizedWord word = new RecognizedWord(value, box, it.confidence(level)); int duplicate = -1;
+                if (!keepWord(value, word.confidence)) continue;
                 for (int i = 0; i < found.size(); i++) if (overlaps(found.get(i).box, box)) { duplicate = i; break; }
                 if (duplicate < 0 && found.size() < 3000) found.add(word);
-                else if (duplicate >= 0 && word.confidence > found.get(duplicate).confidence + 5) found.set(duplicate, word);
+                else if (duplicate >= 0) {
+                    RecognizedWord old = found.get(duplicate);
+                    double oldArea = (double) (old.box[2] - old.box[0]) * (old.box[3] - old.box[1]);
+                    double newArea = (double) (box[2] - box[0]) * (box[3] - box[1]);
+                    if (Math.min(oldArea, newArea) / Math.max(oldArea, newArea) < 0.45) {
+                        if (newArea > oldArea && word.confidence >= 20 && word.value.length() > old.value.length()) found.set(duplicate, word);
+                    } else if (word.confidence > old.confidence + 5) found.set(duplicate, word);
+                }
             } while (found.size() < 3000 && it.next(level));
         } finally { it.delete(); }
     }
@@ -139,20 +156,31 @@ public final class LocalOcr {
 
     public static String recognizePdf(Context context, byte[] input) throws Exception { return recognizePdf(context, input, null); }
     public static String recognizePdf(Context context, byte[] input, Progress progress) throws Exception {
-        File root = prepareModels(context);
         File directory = new File(context.getCacheDir(), "ocr-pdf");
         if (!directory.isDirectory() && !directory.mkdirs()) throw new IllegalStateException("Не удалось подготовить PDF");
         File temporary = File.createTempFile("document-", ".pdf", directory);
-        TessBaseAPI tess = new TessBaseAPI();
+        TessBaseAPI tess = null;
         try {
             try (FileOutputStream output = new FileOutputStream(temporary)) { output.write(input); }
-            if (!tess.init(root.getAbsolutePath(), "rus+eng")) throw new IllegalStateException("Не удалось запустить OCR");
             StringBuilder result = new StringBuilder();
+            PdfTextLayer.init(context);
+            com.tom_roush.pdfbox.pdmodel.PDDocument parsed;
+            try { parsed = com.tom_roush.pdfbox.pdmodel.PDDocument.load(temporary); } catch (Exception ignored) { parsed = null; }
             try (ParcelFileDescriptor descriptor = ParcelFileDescriptor.open(temporary, ParcelFileDescriptor.MODE_READ_ONLY);
-                 PdfRenderer pdf = new PdfRenderer(descriptor)) {
+                 PdfRenderer pdf = new PdfRenderer(descriptor);
+                 com.tom_roush.pdfbox.pdmodel.PDDocument textPdf = parsed) {
                 if (pdf.getPageCount() < 1 || pdf.getPageCount() > 20) throw new IllegalArgumentException("Поддерживаются PDF не более 20 страниц");
                 for (int index = 0; index < pdf.getPageCount(); index++) {
                     if (progress != null) progress.onPage(index + 1, pdf.getPageCount());
+                    String embedded = ""; boolean external = true;
+                    try {
+                        if (textPdf == null) throw new IllegalStateException("No PDF text parser");
+                        embedded = PdfTextLayer.text(textPdf, index);
+                        com.tom_roush.pdfbox.pdmodel.PDResources resources = textPdf.getPage(index).getResources();
+                        external = resources != null && resources.getXObjectNames().iterator().hasNext();
+                    } catch (Exception ignored) { }
+                    if (!external && embedded.codePoints().anyMatch(Character::isLetterOrDigit)) { result.append(embedded).append('\n'); continue; }
+                    if (tess == null) { tess = new TessBaseAPI(); if (!tess.init(prepareModels(context).getAbsolutePath(), "rus+eng")) throw new IllegalStateException("Не удалось запустить OCR"); }
                     try (PdfRenderer.Page page = pdf.openPage(index)) {
                         float scale = Math.min(2f, 3000f / Math.max(page.getWidth(), page.getHeight()));
                         int width = Math.max(1, Math.round(page.getWidth() * scale));
@@ -170,7 +198,7 @@ public final class LocalOcr {
                 }
             }
             return result.toString();
-        } finally { tess.recycle(); temporary.delete(); }
+        } finally { if (tess != null) tess.recycle(); temporary.delete(); }
     }
 
     private static String cleanRecognizedText(TessBaseAPI tess) {
@@ -194,13 +222,28 @@ public final class LocalOcr {
         if (!trimmed.matches(".*[\\p{L}\\p{N}].*")) return false;
         return confidence >= 15f;
     }
+    private static Bitmap adaptiveImage(Bitmap input) {
+        if (input.getWidth() < 50 || input.getHeight() < 50) return null;
+        org.opencv.core.Mat rgba = null, gray = null; Bitmap output = null;
+        try {
+            if (!org.opencv.android.OpenCVLoader.initLocal()) return null;
+            rgba = new org.opencv.core.Mat(); gray = new org.opencv.core.Mat();
+            org.opencv.android.Utils.bitmapToMat(input, rgba);
+            org.opencv.imgproc.Imgproc.cvtColor(rgba, gray, org.opencv.imgproc.Imgproc.COLOR_RGBA2GRAY);
+            org.opencv.imgproc.Imgproc.adaptiveThreshold(gray, gray, 255, org.opencv.imgproc.Imgproc.ADAPTIVE_THRESH_GAUSSIAN_C, org.opencv.imgproc.Imgproc.THRESH_BINARY, 31, 15);
+            output = Bitmap.createBitmap(input.getWidth(), input.getHeight(), Bitmap.Config.ARGB_8888);
+            org.opencv.android.Utils.matToBitmap(gray, output); return output;
+        } catch (RuntimeException | LinkageError error) { if (output != null) output.recycle(); return null; }
+        finally { if (rgba != null) rgba.release(); if (gray != null) gray.release(); }
+    }
     /** Compare the regular scan with an adaptive threshold for uneven illumination. */
     private static String recognizeBest(TessBaseAPI tess, Bitmap input) {
         tess.setImage(input); String original = tess.getUTF8Text(); int originalConfidence = tess.meanConfidence();
         if (originalConfidence >= 80 || input.getWidth() < 50 || input.getHeight() < 50) return original;
-        Bitmap binary = null; org.opencv.core.Mat rgba = new org.opencv.core.Mat(), gray = new org.opencv.core.Mat();
+        Bitmap binary = null; org.opencv.core.Mat rgba = null, gray = null;
         try {
             if (!org.opencv.android.OpenCVLoader.initLocal()) return original;
+            rgba = new org.opencv.core.Mat(); gray = new org.opencv.core.Mat();
             org.opencv.android.Utils.bitmapToMat(input, rgba);
             org.opencv.imgproc.Imgproc.cvtColor(rgba, gray, org.opencv.imgproc.Imgproc.COLOR_RGBA2GRAY);
             org.opencv.imgproc.Imgproc.adaptiveThreshold(gray, gray, 255, org.opencv.imgproc.Imgproc.ADAPTIVE_THRESH_GAUSSIAN_C, org.opencv.imgproc.Imgproc.THRESH_BINARY, 31, 15);
@@ -213,7 +256,7 @@ public final class LocalOcr {
             tess.setImage(input); return tess.getUTF8Text();
         } catch (RuntimeException | LinkageError ignored) {
             tess.setImage(input); return tess.getUTF8Text();
-        } finally { rgba.release(); gray.release(); if (binary != null) binary.recycle(); }
+        } finally { if (rgba != null) rgba.release(); if (gray != null) gray.release(); if (binary != null) binary.recycle(); }
     }
     private static Bitmap prepareImage(Bitmap source) {
         float scale = Math.min(2f, Math.max(1f, 1600f / Math.max(source.getWidth(), source.getHeight())));

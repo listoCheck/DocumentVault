@@ -41,11 +41,15 @@ class VaultFxApp(private val server: String = SERVER, private val prefs: Prefere
     private val dates = mutableMapOf<String, LocalDate>()
     private val folders = mutableMapOf<String, String>()
     private val savedFolders = sortedSetOf<String>()
-    private var selectedFolder: String? = null
+    // null is the explicit all-documents view; the empty string is the root folder.
+    private var selectedFolder: String? = ""
     private val folderBar = HBox(8.0)
     private val folderCards = FlowPane(8.0, 8.0)
     private val documentDragFormat = (javafx.scene.input.DataFormat.lookupMimeType("application/x-documentvault-document") ?: javafx.scene.input.DataFormat("application/x-documentvault-document"))
     private var activeOcrId: String? = null
+    private val knownServerIds = mutableSetOf<String>()
+    private var syncChecking = false
+    private var syncTimer: javafx.animation.Timeline? = null
     private lateinit var stage: Stage
     private lateinit var root: BorderPane
     private val username = TextField()
@@ -115,7 +119,11 @@ class VaultFxApp(private val server: String = SERVER, private val prefs: Prefere
                     super.updateItem(item, empty)
                     text = if (empty || item == null) null else (names[item] ?: item) + (dates[item]?.let { "     ·     до $it" } ?: "")
                     contextMenu = if (empty || item == null) null else menu
-                    graphic = if (!empty && item == activeOcrId) ProgressIndicator().apply { prefWidth = 18.0; prefHeight = 18.0; accessibleText = "Распознавание документа" } else null
+                    graphic = when {
+                        empty || item == null -> null
+                        item == activeOcrId -> ProgressIndicator().apply { prefWidth = 20.0; prefHeight = 20.0; accessibleText = "Распознавание документа" }
+                        else -> javafx.scene.shape.SVGPath().apply { content = "M4 1 H14 L20 7 V25 H4 Z M14 1 V7 H20 M8 13 H16 M8 17 H16 M8 21 H14"; styleClass.add("file-icon") }
+                    }
                 }
             }
         }
@@ -146,8 +154,9 @@ class VaultFxApp(private val server: String = SERVER, private val prefs: Prefere
         stage.scene = Scene(root, 1160.0, 800.0).apply { stylesheets.add(VaultFxApp::class.java.getResource("/vault-fx.css")!!.toExternalForm()) }
         stage.minWidth = 900.0; stage.minHeight = 650.0; applyTheme(); stage.show()
         javafx.animation.Timeline(javafx.animation.KeyFrame(javafx.util.Duration.minutes(1.0), { notifyExpiries() })).apply { cycleCount = javafx.animation.Animation.INDEFINITE; play() }
+        syncTimer = javafx.animation.Timeline(javafx.animation.KeyFrame(javafx.util.Duration.seconds(5.0), { checkForRemoteChanges() })).apply { cycleCount = javafx.animation.Animation.INDEFINITE; play() }
     }
-    override fun stop() { previewWindows.toList().forEach { it.close() }; key?.fill(0); key = null; executor.shutdownNow() }
+    override fun stop() { syncTimer?.stop(); previewWindows.toList().forEach { it.close() }; key?.fill(0); key = null; executor.shutdownNow() }
     private fun updateAuthState() {
         fun visible(node: javafx.scene.Node, shown: Boolean) { node.isVisible = shown; node.isManaged = shown }
         visible(authPane, token == null); visible(unlockPane, token != null && key == null); visible(openPane, token != null && key != null)
@@ -210,7 +219,7 @@ class VaultFxApp(private val server: String = SERVER, private val prefs: Prefere
     }
     private fun lock() {
         previewWindows.toList().forEach { it.close() }; recoveryInput.clear(); key?.fill(0); key = null
-        names.clear(); texts.clear(); dates.clear(); folders.clear(); savedFolders.clear(); selectedFolder = null; documents.clear(); allIds.clear(); search.clear(); renderFolders(); count.text = "0 документов"
+        names.clear(); texts.clear(); dates.clear(); folders.clear(); savedFolders.clear(); knownServerIds.clear(); selectedFolder = ""; documents.clear(); allIds.clear(); search.clear(); renderFolders(); count.text = "0 документов"
         updateAuthState(); status.text = "Хранилище заблокировано."
     }
     private fun logout() {
@@ -234,6 +243,7 @@ class VaultFxApp(private val server: String = SERVER, private val prefs: Prefere
                 Listing(ids, meta, ok)
             } finally { secret?.fill(0) }
         }) { result ->
+            knownServerIds.clear(); knownServerIds.addAll(result.ids)
             names.clear(); texts.clear(); dates.clear(); folders.clear(); savedFolders.clear()
             result.metadata.forEach { (id, value) ->
                 val folder = value.path("folder").asText("")
@@ -248,9 +258,25 @@ class VaultFxApp(private val server: String = SERVER, private val prefs: Prefere
             notifyExpiries()
         }
     }
+    private fun checkForRemoteChanges() {
+        val current = token ?: return
+        if (key == null || busy || syncChecking) return
+        val known = knownServerIds.toSet(); syncChecking = true
+        executor.execute {
+            val changed = runCatching {
+                val remote = api.list(current).toSet()
+                // Upload and metadata are separate requests. Wait until new records are complete.
+                remote != known && (remote - known).all { api.metadata(current, it) != null }
+            }.getOrDefault(false)
+            Platform.runLater {
+                syncChecking = false
+                if (changed && token == current && key != null && !busy) refresh()
+            }
+        }
+    }
     private val allIds = mutableListOf<String>()
     private fun filter() {
-        val q = search.text.trim(); folderCards.isVisible = selectedFolder == null && q.isEmpty() && folderCards.children.isNotEmpty(); folderCards.isManaged = folderCards.isVisible; documents.setAll(allIds.filter { id -> (q.isNotEmpty() || selectedFolder == null || folders.getOrDefault(id, "") == selectedFolder) && (q.isEmpty() || OcrSearch.matches("${names[id] ?: id} ${texts[id] ?: ""}", q)) }); count.text = "Документов: ${documents.size}"
+        val q = search.text.trim(); folderCards.isVisible = (selectedFolder == null || selectedFolder == "") && q.isEmpty() && folderCards.children.isNotEmpty(); folderCards.isManaged = folderCards.isVisible; documents.setAll(allIds.filter { id -> (q.isNotEmpty() || selectedFolder == null || folders.getOrDefault(id, "") == selectedFolder) && (q.isEmpty() || OcrSearch.matches("${names[id] ?: id} ${texts[id] ?: ""}", q)) }); count.text = "Документов: ${documents.size}"
     }
     private fun renderFolders() {
         folderBar.children.clear(); folderCards.children.clear()
@@ -270,20 +296,28 @@ class VaultFxApp(private val server: String = SERVER, private val prefs: Prefere
         fun chip(title: String, folder: String?, acceptFiles: Boolean) {
             val chip = Button(title).apply {
                 styleClass.add(if (selectedFolder == folder) "folder-active" else "folder-chip")
+                if (folder != null && folder.isNotEmpty()) graphic = folderIcon()
                 setOnAction { selectedFolder = folder; renderFolders(); filter() }
             }
             if (acceptFiles) configureDrop(chip, folder.orEmpty())
             folderBar.children.add(chip)
         }
-        chip("Все документы", null, false); chip("Без папки", "", true)
+        if (!selectedFolder.isNullOrEmpty()) chip("..", "", true)
+        chip("Все документы", null, false); chip("Корень", "", true)
         (savedFolders + folders.values).filter(String::isNotBlank).distinct().sorted().forEach { name ->
-            chip("Папка / $name", name, true)
-            val tile = Button("ПАПКА   /   $name").apply { styleClass.add("folder-tile"); accessibleText = "Открыть папку $name"; setOnAction { selectedFolder = name; renderFolders(); filter() } }
+            chip(name, name, true)
+            val tile = Button(name).apply {
+                styleClass.add("folder-tile"); accessibleText = "Открыть папку $name"
+                graphic = folderIcon()
+                contentDisplay = ContentDisplay.TOP; graphicTextGap = 10.0
+                setOnAction { selectedFolder = name; renderFolders(); filter() }
+            }
             configureDrop(tile, name); folderCards.children.add(tile)
         }
-        folderCards.isVisible = selectedFolder == null && search.text.isNullOrBlank() && folderCards.children.isNotEmpty(); folderCards.isManaged = folderCards.isVisible
+        folderCards.isVisible = (selectedFolder == null || selectedFolder == "") && search.text.isNullOrBlank() && folderCards.children.isNotEmpty(); folderCards.isManaged = folderCards.isVisible
         folderBar.children.add(Button("+ Папка").apply { styleClass.add("folder-chip"); setOnAction { if (!busy) createFolderDialog() } })
     }
+    private fun folderIcon() = javafx.scene.shape.SVGPath().apply { content = "M2 5 C2 3.9 2.9 3 4 3 H14 L18 7 H34 C35.1 7 36 7.9 36 9 V25 C36 26.1 35.1 27 34 27 H4 C2.9 27 2 26.1 2 25 Z"; styleClass.add("folder-icon") }
     private fun createFolderDialog() {
         if (key == null || token == null) return error("Сначала разблокируйте хранилище.")
         val input = TextInputDialog().apply { initOwner(stage); title = "Новая папка"; headerText = "Название папки"; themeDialog(this) }.showAndWait().orElse(null) ?: return
@@ -379,7 +413,7 @@ class VaultFxApp(private val server: String = SERVER, private val prefs: Prefere
             status.text = if (!reminderOk) "Текст сохранён, но напоминание не обновлено." else if (expiry == null) "Текст сохранён. Срок не найден." else "Текст сохранён. Срок: $expiry. Проверьте дату в документе."
         }
     }
-    private data class PreviewPage(val width: Int, val height: Int, val pixels: IntArray, val pageCount: Int)
+    private data class PreviewPage(val width: Int, val height: Int, val pixels: IntArray, val pageCount: Int, val textLayer: com.fasterxml.jackson.databind.JsonNode? = null)
     private fun renderPreview(bytes: ByteArray, name: String, pageIndex: Int): PreviewPage {
         fun pixels(image: java.awt.image.BufferedImage, pages: Int): PreviewPage {
             val values = image.getRGB(0, 0, image.width, image.height, null, 0, image.width)
@@ -391,7 +425,7 @@ class VaultFxApp(private val server: String = SERVER, private val prefs: Prefere
                 require(pageIndex in 0 until pdf.numberOfPages) { "Страница PDF не найдена." }
                 val box = pdf.getPage(pageIndex).cropBox
                 val rendered = org.apache.pdfbox.rendering.PDFRenderer(pdf).renderImage(pageIndex, LocalOcr.pdfScale(box.width, box.height), org.apache.pdfbox.rendering.ImageType.RGB)
-                try { return pixels(rendered, pdf.numberOfPages) } finally { rendered.flush() }
+                try { return pixels(rendered, pdf.numberOfPages).copy(textLayer = runCatching { PdfTextLayer.page(pdf, pageIndex) }.getOrNull()) } finally { rendered.flush() }
             }
         }
         val image = LocalOcr.decodeImage(bytes); var oriented: java.awt.image.BufferedImage? = null
@@ -411,8 +445,7 @@ class VaultFxApp(private val server: String = SERVER, private val prefs: Prefere
                 val document = try { DocumentPayload.decode(plain) } finally { plain.fill(0) }; contents = document.second
                 val name = displayName ?: document.first
                 var recognizedText: String? = null
-                val layout = if (!withOcr) null else {
-                    require(!name.endsWith(".pdf", true)) { "Наложение OCR пока доступно только для изображений. Обычный просмотр PDF доступен в меню." }
+                val layout = if (!withOcr || name.endsWith(".pdf", true)) null else {
                     val encrypted = api.metadata(current, id) ?: throw IllegalStateException("Сначала распознайте документ заново.")
                     val metadata = VaultCrypto.decrypt(secret, encrypted, "metadata:$id".toByteArray())
                     try { val data = mapper.readTree(metadata); recognizedText = data.path("text").asText(""); data.path("ocrLayout").takeUnless { it.isMissingNode || it.isNull || it.path("words").size() == 0 } ?: throw IllegalStateException("Координаты текста не найдены. Распознайте изображение заново.") }
@@ -435,7 +468,22 @@ class VaultFxApp(private val server: String = SERVER, private val prefs: Prefere
     private fun showPreview(name: String, contents: ByteArray, layout: com.fasterxml.jackson.databind.JsonNode?, recognizedText: String?, ocrId: String?) {
         val window = Stage(); window.initOwner(stage); window.title = name; previewWindows.add(window)
         val image = javafx.scene.image.ImageView().apply { isPreserveRatio = true; isSmooth = true; fitWidth = 720.0 }
-        val scroll = ScrollPane(image).apply { isFitToWidth = false; isFitToHeight = false; isPannable = false; prefViewportWidth = 760.0; prefViewportHeight = 620.0; styleClass.add("preview-pane") }
+        val highlights = javafx.scene.Group().apply { isMouseTransparent = true }
+        val page = javafx.scene.Group(image, highlights)
+        val scroll = ScrollPane(page).apply { isFitToWidth = false; isFitToHeight = false; isPannable = false; prefViewportWidth = 760.0; prefViewportHeight = 620.0; styleClass.add("preview-pane") }
+        var selection = layout?.let(::OcrTextSelection); var selectionStart = -1; var selectionEnd = -1; var selecting = false
+        fun drawSelection() {
+            highlights.children.clear()
+            val width = image.boundsInLocal.width; val height = image.boundsInLocal.height
+            selection?.selected(selectionStart, selectionEnd)?.forEach { word ->
+                highlights.children.add(javafx.scene.shape.Rectangle(word.left * width, word.top * height, (word.right - word.left) * width, (word.bottom - word.top) * height).apply { fill = javafx.scene.paint.Color.rgb(100, 150, 255, 0.38) })
+            }
+        }
+        image.boundsInLocalProperty().addListener { _, _, _ -> drawSelection() }
+        fun copySelection() {
+            val text = selection?.text(selectionStart, selectionEnd).orEmpty()
+            if (text.isNotEmpty()) { val content = javafx.scene.input.ClipboardContent(); content.putString(text); javafx.scene.input.Clipboard.getSystemClipboard().setContent(content); status.text = "Текст скопирован." }
+        }
         val pageLabel = Label(""); val previous = Button("Назад"); val next = Button("Далее"); val smaller = Button("−"); val larger = Button("+"); val fit = Button("По ширине")
         val pageControls = HBox(8.0, previous, pageLabel, next).apply { alignment = Pos.CENTER }
         val zoomControls = HBox(8.0, smaller, fit, larger, Label("Колесо — масштаб · ЛКМ — перемещение").apply { styleClass.add("muted") }).apply { alignment = Pos.CENTER }
@@ -449,6 +497,7 @@ class VaultFxApp(private val server: String = SERVER, private val prefs: Prefere
                         val frame = javafx.scene.image.WritableImage(result.width, result.height)
                         frame.pixelWriter.setPixels(0, 0, result.width, result.height, javafx.scene.image.PixelFormat.getIntArgbInstance(), result.pixels, 0, result.width)
                         image.image = frame; totalPages = result.pageCount; pageLabel.text = "Страница ${index + 1} из $totalPages"
+                        if (layout == null) { selection = result.textLayer?.let(::OcrTextSelection); selectionStart = -1; selectionEnd = -1; drawSelection() }
                         previous.isDisable = index == 0; next.isDisable = index + 1 >= totalPages
                         pageControls.isVisible = totalPages > 1; pageControls.isManaged = totalPages > 1
                         status.text = "Документ открыт."
@@ -482,34 +531,41 @@ class VaultFxApp(private val server: String = SERVER, private val prefs: Prefere
         }
         var dragX = 0.0; var dragY = 0.0; var startH = 0.0; var startV = 0.0
         image.setOnMousePressed { event -> if (event.button == javafx.scene.input.MouseButton.PRIMARY) {
+            val hit = if (image.boundsInLocal.width > 0 && image.boundsInLocal.height > 0) selection?.hit(event.x / image.boundsInLocal.width, event.y / image.boundsInLocal.height) ?: -1 else -1
+            if (hit >= 0) { selectionStart = hit; selectionEnd = hit; selecting = true; drawSelection(); image.cursor = javafx.scene.Cursor.TEXT; event.consume(); return@setOnMousePressed }
+            selecting = false
             dragX = event.sceneX; dragY = event.sceneY; startH = scroll.hvalue; startV = scroll.vvalue
             image.cursor = javafx.scene.Cursor.CLOSED_HAND; event.consume()
         } }
         image.setOnMouseDragged { event -> if (event.isPrimaryButtonDown) {
+            if (selecting) { selectionEnd = selection?.nearest(event.x / image.boundsInLocal.width, event.y / image.boundsInLocal.height) ?: -1; drawSelection(); event.consume(); return@setOnMouseDragged }
             val overflowX = (image.boundsInParent.width - scroll.viewportBounds.width).coerceAtLeast(0.0)
             val overflowY = (image.boundsInParent.height - scroll.viewportBounds.height).coerceAtLeast(0.0)
             if (overflowX > 0) scroll.hvalue = (startH - (event.sceneX - dragX) / overflowX).coerceIn(0.0, 1.0)
             if (overflowY > 0) scroll.vvalue = (startV - (event.sceneY - dragY) / overflowY).coerceIn(0.0, 1.0)
             event.consume()
         } }
-        image.setOnMouseReleased { image.cursor = javafx.scene.Cursor.OPEN_HAND }
+        image.setOnMouseMoved { event ->
+            val hit = if (image.boundsInLocal.width > 0 && image.boundsInLocal.height > 0) selection?.hit(event.x / image.boundsInLocal.width, event.y / image.boundsInLocal.height) ?: -1 else -1
+            image.cursor = if (hit >= 0) javafx.scene.Cursor.TEXT else javafx.scene.Cursor.OPEN_HAND
+        }
+        image.setOnMouseReleased { event ->
+            selecting = false
+            val hit = if (image.boundsInLocal.width > 0 && image.boundsInLocal.height > 0) selection?.hit(event.x / image.boundsInLocal.width, event.y / image.boundsInLocal.height) ?: -1 else -1
+            image.cursor = if (hit >= 0) javafx.scene.Cursor.TEXT else javafx.scene.Cursor.OPEN_HAND
+        }
         image.cursor = javafx.scene.Cursor.OPEN_HAND
-        var selectableText: TextArea? = null
-        val display: javafx.scene.Node = if (layout == null) scroll else {
-            val selectable = TextArea(recognizedText.orEmpty()).apply { isEditable = false; isWrapText = true; accessibleText = "Распознанный текст для выделения и копирования"; VBox.setVgrow(this, Priority.ALWAYS) }
-            selectableText = selectable
-            val copy = Button("Копировать текст").apply { styleClass.add("secondary"); setOnAction {
-                val clipboard = javafx.scene.input.ClipboardContent(); clipboard.putString(selectable.selectedText.takeIf(String::isNotEmpty) ?: selectable.text)
-                javafx.scene.input.Clipboard.getSystemClipboard().setContent(clipboard); status.text = "Текст скопирован."
-            } }
-            val textPanel = VBox(10.0, Label("РАСПОЗНАННЫЙ ТЕКСТ").apply { styleClass.add("eyebrow") }, selectable, copy).apply { minWidth = 180.0; prefWidth = 260.0 }
-            SplitPane(scroll, textPanel).apply { setDividerPositions(0.67) }
+        val display: javafx.scene.Node = scroll
+        if (selection != null || name.endsWith(".pdf", true)) {
+            val copy = Button("Копировать выделенное").apply { styleClass.add("secondary"); setOnAction { copySelection() } }
+            zoomControls.children.add(copy)
+            window.addEventHandler(javafx.scene.input.KeyEvent.KEY_PRESSED) { event -> if (event.isShortcutDown && event.code == javafx.scene.input.KeyCode.C) { copySelection(); event.consume() } }
         }
         val content = VBox(10.0, display, zoomControls, pageControls).apply { padding = Insets(12.0); VBox.setVgrow(display, Priority.ALWAYS) }
         content.styleClass.add("app"); content.pseudoClassStateChanged(javafx.css.PseudoClass.getPseudoClass("light"), light)
         listOf(previous, next, smaller, larger, fit).forEach { it.styleClass.add("secondary") }
         window.scene = Scene(content, 820.0, 760.0).apply { stylesheets.add(VaultFxApp::class.java.getResource("/vault-fx.css")!!.toExternalForm()) }; window.minWidth = 420.0; window.minHeight = 400.0
-        window.setOnHidden { closed = true; image.image = null; selectableText?.clear(); contents.fill(0); previewWindows.remove(window) }
+        window.setOnHidden { closed = true; image.image = null; highlights.children.clear(); contents.fill(0); previewWindows.remove(window) }
         window.show(); render()
     }
     private fun renameDocument() {

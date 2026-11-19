@@ -59,6 +59,11 @@ public final class DeviceFoldersTest {
             });
             DeviceUiTest.waitFor(runner, activity, "Пример.png");
             DeviceUiTest.waitFor(runner, activity, "Пустая");
+            String remoteId = UUID.randomUUID().toString();
+            api.upload(token, remoteId, VaultCrypto.encrypt(key, folderPayload, "document:" + remoteId));
+            byte[] remoteMetadata = new JSONObject().put("recordType", "documentvault.folder.v1").put("folder", "С другого устройства").toString().getBytes(StandardCharsets.UTF_8);
+            api.saveMetadata(token, remoteId, VaultCrypto.encrypt(key, remoteMetadata, "metadata:" + remoteId));
+            DeviceUiTest.waitFor(runner, activity, "С другого устройства");
             runner.runOnMainSync(() -> assertNull("Encrypted folder records must not be shown as files", DeviceUiTest.findByText(activity.getWindow().getDecorView(), folderId)));
             runner.runOnMainSync(() -> {
                 assertNotNull(DeviceUiTest.findByText(activity.getWindow().getDecorView(), "Работа"));

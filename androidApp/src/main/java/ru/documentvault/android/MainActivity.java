@@ -77,6 +77,12 @@ public final class MainActivity extends FragmentActivity {
     private String accountIdentity;
     private Button biometricUnlock;
     private volatile boolean busy;
+    private final android.os.Handler syncHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+    private final java.util.Set<String> knownServerIds = new java.util.HashSet<>();
+    private boolean syncChecking;
+    private final Runnable syncTick = new Runnable() {
+        @Override public void run() { checkForRemoteChanges(); syncHandler.postDelayed(this, 5000); }
+    };
     private boolean creatingAccount;
 
     @Override protected void onCreate(Bundle state) {
@@ -289,11 +295,13 @@ public final class MainActivity extends FragmentActivity {
     private void renderFolders() {
         folderBar.removeAllViews();
         java.util.Set<String> names = new java.util.TreeSet<>(savedFolders); names.addAll(documentFolders.values()); names.remove("");
+        if (selectedFolder != null && !selectedFolder.isEmpty()) addFolderChip("..", "");
         addFolderChip("Все", null); addFolderChip("Без папки", "");
         for (String name : names) addFolderChip(name, name);
     }
     private void addFolderChip(String title, String folder) {
         TextView chip = label(title, 13, java.util.Objects.equals(selectedFolder, folder) ? Color.rgb(25, 24, 34) : Color.rgb(45, 38, 69), true);
+        if (folder != null && !folder.isEmpty()) { android.graphics.drawable.Drawable icon = ContextCompat.getDrawable(this, ru.documentvault.android.R.drawable.ic_folder); if (icon != null) { icon = icon.mutate(); icon.setBounds(0, 0, dp(20), dp(16)); chip.setCompoundDrawables(icon, null, null, null); chip.setCompoundDrawablePadding(dp(7)); } }
         chip.setPadding(dp(16), dp(10), dp(16), dp(10)); chip.setBackground(round(java.util.Objects.equals(selectedFolder, folder) ? Color.rgb(190, 245, 58) : Color.rgb(228, 221, 249), 16));
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-2, -2); params.setMargins(0, 0, dp(8), 0); folderBar.addView(chip, params);
         chip.setOnClickListener(v -> { selectedFolder = folder; renderDocuments(); });
@@ -439,12 +447,12 @@ public final class MainActivity extends FragmentActivity {
             try {
                 JSONArray list = selectedApi.list(selectedToken);
                 java.util.List<String> idList = new java.util.ArrayList<>(), nameList = new java.util.ArrayList<>();
-                java.util.Set<String> saved = new java.util.TreeSet<>();
+                java.util.Set<String> saved = new java.util.TreeSet<>(), serverIds = new java.util.HashSet<>();
                 java.util.Map<String, String> dates = new java.util.HashMap<>();
                 java.util.Map<String, String> texts = new java.util.HashMap<>();
                 java.util.Map<String, String> folders = new java.util.HashMap<>();
                 for (int i = 0; i < list.length(); i++) {
-                    String id = list.getJSONObject(i).getString("id"), name = id; boolean folderRecord = false;
+                    String id = list.getJSONObject(i).getString("id"), name = id; serverIds.add(id); boolean folderRecord = false;
                     if (key != null) {
                         byte[] encrypted = selectedApi.metadata(selectedToken, id);
                         if (encrypted != null) {
@@ -467,9 +475,10 @@ public final class MainActivity extends FragmentActivity {
                 String[] ids = idList.toArray(new String[0]), names = nameList.toArray(new String[0]);
                 boolean reminderError = false;
                 if (key != null && identity != null) try { new ReminderStore(getApplicationContext()).replaceAccount(identity, dates); } catch (Exception e) { reminderError = true; }
-                return new DocumentListing(ids, names, dates, texts, folders, saved, reminderError);
+                return new DocumentListing(ids, names, dates, texts, folders, saved, serverIds, reminderError);
             } finally { if (key != null) Arrays.fill(key, (byte) 0); }
         }, listing -> {
+            knownServerIds.clear(); knownServerIds.addAll(listing.serverIds);
             documentIds = listing.ids; documentNames = listing.names; documentExpiry.clear(); documentExpiry.putAll(listing.dates); documentText.clear(); documentText.putAll(listing.texts); documentFolders.clear(); documentFolders.putAll(listing.folders); savedFolders.clear(); savedFolders.addAll(listing.savedFolders); renderDocuments();
             String resultMessage = completionMessage == null ? "Документы обновлены." : completionMessage;
             status.setText(listing.reminderError ? resultMessage + " Напоминания не обновлены." : resultMessage);
@@ -477,9 +486,32 @@ public final class MainActivity extends FragmentActivity {
         });
     }
     private static final class DocumentListing {
-        final String[] ids, names; final java.util.Map<String, String> dates, texts, folders; final java.util.Set<String> savedFolders; final boolean reminderError;
-        DocumentListing(String[] ids, String[] names, java.util.Map<String, String> dates, java.util.Map<String, String> texts, java.util.Map<String, String> folders, java.util.Set<String> savedFolders, boolean reminderError) { this.ids = ids; this.names = names; this.dates = dates; this.texts = texts; this.folders = folders; this.savedFolders = savedFolders; this.reminderError = reminderError; }
+        final String[] ids, names; final java.util.Map<String, String> dates, texts, folders; final java.util.Set<String> savedFolders, serverIds; final boolean reminderError;
+        DocumentListing(String[] ids, String[] names, java.util.Map<String, String> dates, java.util.Map<String, String> texts, java.util.Map<String, String> folders, java.util.Set<String> savedFolders, java.util.Set<String> serverIds, boolean reminderError) { this.ids = ids; this.names = names; this.dates = dates; this.texts = texts; this.folders = folders; this.savedFolders = savedFolders; this.serverIds = serverIds; this.reminderError = reminderError; }
     }
+    private void checkForRemoteChanges() {
+        if (token == null || masterKey == null || busy || syncChecking) return;
+        VaultApi selectedApi = api; String selectedToken = token;
+        java.util.Set<String> known = new java.util.HashSet<>(knownServerIds); syncChecking = true;
+        executor.execute(() -> {
+            boolean changed = false;
+            try {
+                JSONArray list = selectedApi.list(selectedToken); java.util.Set<String> remote = new java.util.HashSet<>();
+                for (int i = 0; i < list.length(); i++) remote.add(list.getJSONObject(i).getString("id"));
+                if (!remote.equals(known)) {
+                    changed = true;
+                    for (String id : remote) if (!known.contains(id) && selectedApi.metadata(selectedToken, id) == null) { changed = false; break; }
+                }
+            } catch (Exception ignored) { }
+            final boolean needsRefresh = changed;
+            runOnUiThread(() -> {
+                syncChecking = false;
+                if (needsRefresh && !isFinishing() && !isDestroyed() && selectedToken.equals(token) && masterKey != null && !busy) refresh();
+            });
+        });
+    }
+    @Override protected void onResume() { super.onResume(); syncHandler.removeCallbacks(syncTick); syncHandler.post(syncTick); }
+    @Override protected void onPause() { syncHandler.removeCallbacks(syncTick); super.onPause(); }
     private void moveToFolder(String id) {
         if (masterKey == null || token == null) return;
         java.util.Set<String> existing = new java.util.TreeSet<>(savedFolders); existing.addAll(documentFolders.values()); existing.remove("");
@@ -793,6 +825,7 @@ public final class MainActivity extends FragmentActivity {
         activeOcrId = id; renderDocuments();
         loadFile(id, file -> {
             if (masterKey == null || token == null) { Arrays.fill(file.content, (byte) 0); return; }
+            if (file.name.toLowerCase(java.util.Locale.ROOT).endsWith(".pdf")) { activeOcrId = null; renderDocuments(); showPreview(file); return; }
             byte[] key = masterKey.clone(); VaultApi selectedApi = api; String selectedToken = token;
             runTask("Готовим просмотр с текстом…", () -> {
             byte[] plain = null; android.graphics.Bitmap image = null, overlay = null;
@@ -804,7 +837,7 @@ public final class MainActivity extends FragmentActivity {
                 if (layout == null || layout.optJSONArray("words") == null || layout.optJSONArray("words").length() == 0) throw new IllegalArgumentException("Нет координат текста. Распознайте документ заново и сохраните без правок.");
                 image = LocalOcr.decodeImage(file.content); overlay = OcrOverlay.render(image, layout);
                 ByteArrayOutputStream output = new ByteArrayOutputStream(); if (!overlay.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, output)) throw new IllegalStateException("Не удалось подготовить просмотр.");
-                return new FileData("Распознанный текст.png", output.toByteArray(), metadata.optString("text", ""));
+                return new FileData("Распознанный текст.png", output.toByteArray(), metadata.optString("text", ""), layout.toString());
             } finally { Arrays.fill(key, (byte) 0); Arrays.fill(file.content, (byte) 0); if (plain != null) Arrays.fill(plain, (byte) 0); if (image != null) image.recycle(); if (overlay != null) overlay.recycle(); }
             }, preview -> { activeOcrId = null; renderDocuments(); showPreview(preview); });
         });
@@ -847,12 +880,11 @@ public final class MainActivity extends FragmentActivity {
             try { image = LocalOcr.orientBitmap(decoded, orientation); } catch (Throwable e) { decoded.recycle(); throw e; }
             if (image != decoded) decoded.recycle();
             ZoomImageView view = new ZoomImageView(this); view.setImageBitmap(image);
-            LinearLayout content = column(); content.addView(view, new LinearLayout.LayoutParams(-1, dp(file.ocrText == null ? 430 : 250))); addZoomControls(content, view);
-            TextView[] ocrTextView = {null};
-            if (file.ocrText != null) { TextView selectable = label(file.ocrText, 14, ink(), false); ocrTextView[0] = selectable; selectable.setTextIsSelectable(true); selectable.setPadding(dp(12), dp(10), dp(12), dp(10)); selectable.setBackground(round(Color.rgb(242, 240, 250), 12));
-                ScrollView textScroll = new ScrollView(this); textScroll.addView(selectable); content.addView(label("Распознанный текст · выделите для копирования", 12, muted(), true)); content.addView(textScroll, new LinearLayout.LayoutParams(-1, dp(110))); }
+            if (file.ocrLayout != null) view.setOcrLayout(new JSONObject(file.ocrLayout));
+            LinearLayout content = column(); content.addView(view, new LinearLayout.LayoutParams(-1, dp(430))); addZoomControls(content, view);
+            if (file.ocrLayout != null) content.addView(label("Удерживайте слово и проведите по тексту, чтобы выделить.", 12, muted(), false));
             previewDialog = new AlertDialog.Builder(this).setTitle(file.name).setView(content).setPositiveButton("Закрыть", null).create();
-            previewDialog.setOnDismissListener(d -> { view.setImageDrawable(null); if (ocrTextView[0] != null) ocrTextView[0].setText(""); image.recycle(); previewDialog = null; }); previewDialog.show();
+            previewDialog.setOnDismissListener(d -> { view.setOcrLayout(null); view.setImageDrawable(null); image.recycle(); previewDialog = null; }); previewDialog.show();
         } catch (Exception e) { status.setText("Просмотр: " + e.getMessage()); }
         finally { Arrays.fill(file.content, (byte) 0); }
     }
@@ -879,24 +911,35 @@ public final class MainActivity extends FragmentActivity {
             content.addView(image, new LinearLayout.LayoutParams(-1, dp(430))); addZoomControls(content, image); TextView pageLabel = label("", 14, muted(), true); pageLabel.setGravity(Gravity.CENTER); content.addView(pageLabel);
             LinearLayout controls = new LinearLayout(this); Button previous = new Button(this), next = new Button(this); styleCompactButton(previous); styleCompactButton(next); previous.setText("Назад"); next.setText("Далее");
             controls.addView(previous, new LinearLayout.LayoutParams(0, -2, 1)); controls.addView(next, new LinearLayout.LayoutParams(0, -2, 1)); content.addView(controls);
-            int[] page = {0}; android.graphics.Bitmap[] shown = {null};
+            int[] page = {0}; boolean[] closed = {false}; android.graphics.Bitmap[] shown = {null};
             Runnable render = () -> { try (android.graphics.pdf.PdfRenderer.Page current = pdf.openPage(page[0])) {
                 float scale = Math.min(2f, 1800f / Math.max(current.getWidth(), current.getHeight()));
                 android.graphics.Bitmap bitmap = android.graphics.Bitmap.createBitmap(Math.max(1, Math.round(current.getWidth() * scale)), Math.max(1, Math.round(current.getHeight() * scale)), android.graphics.Bitmap.Config.ARGB_8888);
                 bitmap.eraseColor(Color.WHITE); current.render(bitmap, null, null, android.graphics.pdf.PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY);
-                image.setImageBitmap(bitmap); if (shown[0] != null) shown[0].recycle(); shown[0] = bitmap;
+                image.setOcrLayout(null); image.setImageBitmap(bitmap); if (shown[0] != null) shown[0].recycle(); shown[0] = bitmap;
                 pageLabel.setText("Страница " + (page[0] + 1) + " из " + pdf.getPageCount()); previous.setEnabled(page[0] > 0); next.setEnabled(page[0] + 1 < pdf.getPageCount());
+                final int index = page[0];
+                executor.execute(() -> {
+                    try {
+                        PdfTextLayer.init(getApplicationContext());
+                        try (com.tom_roush.pdfbox.pdmodel.PDDocument document = com.tom_roush.pdfbox.pdmodel.PDDocument.load(temporary)) {
+                            JSONObject textLayout = PdfTextLayer.page(document, index);
+                            runOnUiThread(() -> { if (!closed[0] && page[0] == index) image.setOcrLayout(textLayout); });
+                        }
+                    } catch (Exception ignored) { }
+                });
             } catch (Exception e) { status.setText("Не удалось открыть страницу PDF."); } };
             previous.setOnClickListener(v -> { if (page[0] > 0) { page[0]--; render.run(); } }); next.setOnClickListener(v -> { if (page[0] + 1 < pdf.getPageCount()) { page[0]++; render.run(); } });
             previewDialog = new AlertDialog.Builder(this).setTitle(file.name).setView(content).setPositiveButton("Закрыть", null).create();
-            previewDialog.setOnDismissListener(d -> { image.setImageDrawable(null); if (shown[0] != null) shown[0].recycle(); pdf.close(); try { opened.close(); } catch (java.io.IOException ignored) { } temporary.delete(); previewDialog = null; });
+            previewDialog.setOnDismissListener(d -> { closed[0] = true; image.setOcrLayout(null); image.setImageDrawable(null); if (shown[0] != null) shown[0].recycle(); pdf.close(); try { opened.close(); } catch (java.io.IOException ignored) { } temporary.delete(); previewDialog = null; });
             previewDialog.show(); render.run();
         } catch (Exception e) { if (renderer != null) renderer.close(); if (descriptor != null) try { descriptor.close(); } catch (java.io.IOException ignored) { } temporary.delete(); throw e; }
     }
     private static final class FileData {
-        final String name, ocrText; final byte[] content;
+        final String name, ocrText, ocrLayout; final byte[] content;
         FileData(String name, byte[] content) { this(name, content, null); }
-        FileData(String name, byte[] content, String ocrText) { this.name = name; this.content = content; this.ocrText = ocrText; }
+        FileData(String name, byte[] content, String ocrText) { this(name, content, ocrText, null); }
+        FileData(String name, byte[] content, String ocrText, String ocrLayout) { this.name = name; this.content = content; this.ocrText = ocrText; this.ocrLayout = ocrLayout; }
     }
     private String fileName(Uri uri) {
         try (Cursor cursor = getContentResolver().query(uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {

@@ -38,7 +38,14 @@ class FxDesktopTest {
         api.register("fxuser", password, recovery.toCharArray())
         val token = api.login("fxuser", password); val master = api.unlock(token, recovery.toCharArray()); val id = UUID.randomUUID().toString()
         val pdf = java.io.ByteArrayOutputStream()
-        org.apache.pdfbox.pdmodel.PDDocument().use { document -> document.addPage(org.apache.pdfbox.pdmodel.PDPage()); document.addPage(org.apache.pdfbox.pdmodel.PDPage()); document.save(pdf) }
+        org.apache.pdfbox.pdmodel.PDDocument().use { document ->
+            val first = org.apache.pdfbox.pdmodel.PDPage(); document.addPage(first); document.addPage(org.apache.pdfbox.pdmodel.PDPage())
+            org.apache.pdfbox.pdmodel.PDPageContentStream(document, first).use { stream ->
+                stream.beginText(); stream.setFont(org.apache.pdfbox.pdmodel.font.PDType1Font(org.apache.pdfbox.pdmodel.font.Standard14Fonts.FontName.HELVETICA), 24f)
+                stream.newLineAtOffset(60f, 700f); stream.showText("FIRST DOCUMENT"); stream.endText()
+            }
+            document.save(pdf)
+        }
         val payload = DocumentPayload.encode("пример.pdf", pdf.toByteArray())
         try { api.upload(token, id, VaultCrypto.encrypt(master, payload, "document:$id".toByteArray())); api.saveMetadata(token, id, VaultCrypto.encrypt(master, "{\"name\":\"пример.pdf\",\"text\":\"договор\",\"expiry\":\"2030-12-31\"}".toByteArray(), "metadata:$id".toByteArray())) } finally { payload.fill(0) }
         val prefs = Preferences.userRoot().node("/documentvault-fx-test/" + UUID.randomUUID())
@@ -132,8 +139,8 @@ class FxDesktopTest {
                 assertEquals("documentvault.folder.v1", meta["recordType"].asText()); assertEquals("Работа", meta["folder"].asText())
             } finally { folderMetadata.fill(0) }
             fx {
-                assertTrue(nodes().filterIsInstance<Button>().any { it.text == "Папка / Работа" }); button("Все документы").fire()
-                val tile = button("ПАПКА   /   Работа"); assertTrue(tile.isVisible && tile.onDragDropped != null && tile.onDragOver != null)
+                assertTrue(nodes().filterIsInstance<Button>().any { it.text == "Работа" && it.styleClass.contains("folder-active") }); button("Все документы").fire()
+                val tile = nodes().filterIsInstance<Button>().first { it.text == "Работа" && it.styleClass.contains("folder-tile") }; assertTrue(tile.isVisible && tile.graphic is javafx.scene.shape.SVGPath && tile.onDragDropped != null && tile.onDragOver != null)
                 window.scene.root.applyCss(); window.scene.root.layout()
                 val shot = window.scene.root.snapshot(SnapshotParameters(), null as WritableImage?); val out = BufferedImage(shot.width.toInt(), shot.height.toInt(), BufferedImage.TYPE_INT_ARGB)
                 for (y in 0 until out.height) for (x in 0 until out.width) out.setRGB(x, y, shot.pixelReader.getArgb(x, y))
@@ -152,11 +159,32 @@ class FxDesktopTest {
             awaitStatus("Документ перемещён")
             val moved = VaultCrypto.decrypt(master, api.metadata(token, id)!!, "metadata:$id".toByteArray())
             try { assertEquals("Работа", com.fasterxml.jackson.databind.ObjectMapper().readTree(moved)["folder"].asText()) } finally { moved.fill(0) }
-            fx { button("Папка / Работа").fire(); val list = nodes().filterIsInstance<ListView<*>>().first(); assertEquals(listOf(id), list.items.toList()); button("Обновить").fire() }
-            awaitStatus("Документы обновлены")
             fx {
-                assertTrue(nodes().filterIsInstance<Button>().any { it.text == "Папка / Работа" }); button("Все документы").fire()
-                val tile = button("ПАПКА   /   Работа"); assertTrue(tile.isVisible && tile.onDragDropped != null && tile.onDragOver != null)
+                button("Корень").fire()
+                val list = nodes().filterIsInstance<ListView<*>>().first()
+                assertTrue(list.items.isEmpty(), "Moved document must not remain in the root folder")
+                val tile = nodes().filterIsInstance<Button>().first { it.text == "Работа" && it.styleClass.contains("folder-tile") }
+                assertTrue(tile.isVisible, "Root must show folder tiles")
+                tile.fire()
+                assertEquals(listOf(id), list.items.toList())
+                button("..").fire(); assertTrue(list.items.isEmpty(), "Parent returns to the root")
+            }
+            fx { nodes().filterIsInstance<Button>().first { it.text == "Работа" && it.styleClass.contains("folder-tile") }.fire(); val list = nodes().filterIsInstance<ListView<*>>().first(); assertEquals(listOf(id), list.items.toList()); button("Обновить").fire() }
+            awaitStatus("Документы обновлены")
+            val remoteFolderId = UUID.randomUUID().toString()
+            val remotePayload = DocumentPayload.encode("folder", byteArrayOf())
+            try { api.upload(token, remoteFolderId, VaultCrypto.encrypt(master, remotePayload, "document:$remoteFolderId".toByteArray())) } finally { remotePayload.fill(0) }
+            api.saveMetadata(token, remoteFolderId, VaultCrypto.encrypt(master, "{\"recordType\":\"documentvault.folder.v1\",\"folder\":\"Удалённая\"}".toByteArray(), "metadata:$remoteFolderId".toByteArray()))
+            val syncDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20)
+            var synced = false
+            while (!synced && System.nanoTime() < syncDeadline) {
+                fx { synced = nodes().filterIsInstance<Button>().any { it.text == "Удалённая" } }
+                if (!synced) Thread.sleep(100)
+            }
+            assertTrue(synced, "Remote folder should appear without a manual refresh")
+            fx {
+                assertTrue(nodes().filterIsInstance<Button>().any { it.text == "Работа" && it.styleClass.contains("folder-active") }); button("Все документы").fire()
+                val tile = nodes().filterIsInstance<Button>().first { it.text == "Работа" && it.styleClass.contains("folder-tile") }; assertTrue(tile.isVisible && tile.graphic is javafx.scene.shape.SVGPath && tile.onDragDropped != null && tile.onDragOver != null)
                 window.scene.root.applyCss(); window.scene.root.layout()
                 val shot = window.scene.root.snapshot(SnapshotParameters(), null as WritableImage?); val out = BufferedImage(shot.width.toInt(), shot.height.toInt(), BufferedImage.TYPE_INT_ARGB)
                 for (y in 0 until out.height) for (x in 0 until out.width) out.setRGB(x, y, shot.pixelReader.getArgb(x, y))
@@ -195,7 +223,12 @@ class FxDesktopTest {
             awaitStatus("Документ открыт")
             fx {
                 val preview = javafx.stage.Window.getWindows().filterIsInstance<Stage>().first { it !== window && it.title == "пример.pdf" }
-                assertTrue(preview.scene.root.lookupAll("*").filterIsInstance<javafx.scene.image.ImageView>().any { it.image != null })
+                val pageImage = preview.scene.root.lookupAll("*").filterIsInstance<javafx.scene.image.ImageView>().first { it.image != null }
+                val position = org.apache.pdfbox.Loader.loadPDF(pdf.toByteArray()).use { OcrTextSelection(PdfTextLayer.page(it, 0)).words.first() }
+                val x = (position.left + position.right) * pageImage.boundsInLocal.width / 2; val y = (position.top + position.bottom) * pageImage.boundsInLocal.height / 2
+                pageImage.onMousePressed.handle(javafx.scene.input.MouseEvent(javafx.scene.input.MouseEvent.MOUSE_PRESSED, x, y, x, y, javafx.scene.input.MouseButton.PRIMARY, 1, false, false, false, false, true, false, false, false, false, true, null))
+                preview.scene.root.lookupAll("*").filterIsInstance<Button>().first { it.text == "Копировать выделенное" }.fire()
+                assertEquals("FIRST", javafx.scene.input.Clipboard.getSystemClipboard().string)
                 assertTrue(preview.scene.root.lookupAll("*").filterIsInstance<Label>().any { it.text == "Страница 1 из 2" })
                 preview.scene.root.lookupAll("*").filterIsInstance<Button>().first { it.text == "Далее" }.fire()
             }
@@ -269,8 +302,13 @@ class FxDesktopTest {
                 val preview = javafx.stage.Window.getWindows().filterIsInstance<Stage>().first { it !== window && it.title == "ocr.png" }
                 val imageView = preview.scene.root.lookupAll("*").filterIsInstance<javafx.scene.image.ImageView>().first()
                 val scroll = preview.scene.root.lookupAll("*").filterIsInstance<javafx.scene.control.ScrollPane>().first()
-                val recognized = preview.scene.root.lookupAll("*").filterIsInstance<javafx.scene.control.TextArea>().first()
-                assertEquals("DOCUMENT", recognized.text); assertTrue(!recognized.isEditable); recognized.selectRange(0, 3); assertEquals("DOC", recognized.selectedText)
+                assertTrue(preview.scene.root.lookupAll("*").filterIsInstance<javafx.scene.control.TextArea>().isEmpty())
+                val hover = javafx.scene.input.MouseEvent(javafx.scene.input.MouseEvent.MOUSE_MOVED, imageView.boundsInLocal.width * .2, imageView.boundsInLocal.height * .25, 0.0, 0.0, javafx.scene.input.MouseButton.NONE, 0, false, false, false, false, false, false, false, false, false, false, null)
+                imageView.onMouseMoved.handle(hover); assertEquals(javafx.scene.Cursor.TEXT, imageView.cursor)
+                val select = javafx.scene.input.MouseEvent(javafx.scene.input.MouseEvent.MOUSE_PRESSED, imageView.boundsInLocal.width * .2, imageView.boundsInLocal.height * .25, 0.0, 0.0, javafx.scene.input.MouseButton.PRIMARY, 1, false, false, false, false, true, false, false, false, false, true, null)
+                javafx.event.Event.fireEvent(imageView, select)
+                preview.scene.root.lookupAll("*").filterIsInstance<Button>().first { it.text == "Копировать выделенное" }.fire()
+                assertEquals("DOCUMENT", javafx.scene.input.Clipboard.getSystemClipboard().string)
                 preview.scene.root.applyCss(); preview.scene.root.layout()
                 val screen = preview.scene.root.snapshot(SnapshotParameters(), null as WritableImage?)
                 val screenshot = BufferedImage(screen.width.toInt(), screen.height.toInt(), BufferedImage.TYPE_INT_ARGB)

@@ -12,9 +12,51 @@ import java.awt.image.BufferedImage
 import java.io.ByteArrayOutputStream
 import javax.imageio.ImageIO
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 class LocalOcrTest {
+    @Test fun `blue stamp lettering is not added to recognized text`() {
+        val image = BufferedImage(1200, 600, BufferedImage.TYPE_INT_RGB)
+        image.createGraphics().also { g ->
+            g.color = Color.WHITE; g.fillRect(0, 0, image.width, image.height); g.font = Font("Arial", Font.BOLD, 72)
+            g.color = Color.BLACK; g.drawString("DOCUMENT 2030", 60, 180)
+            g.color = Color(40, 65, 150); g.drawString("FAKESTAMP", 60, 430); g.dispose()
+        }
+        val bytes = ByteArrayOutputStream().also { ImageIO.write(image, "png", it) }.toByteArray(); image.flush()
+        val result = LocalOcr.recognize("blue.png", bytes)
+        assertTrue(result.contains("DOCUMENT", ignoreCase = true), result)
+        assertTrue(!result.contains("FAKESTAMP", ignoreCase = true), result)
+    }
+    @Test fun `reads multiple lines of small text on a dim photographed page`() {
+        val image = BufferedImage(900, 1250, BufferedImage.TYPE_INT_RGB)
+        val g = image.createGraphics()
+        g.paint = java.awt.GradientPaint(0f, 0f, Color(125, 125, 125), 900f, 1250f, Color(205, 205, 205))
+        g.fillRect(0, 0, image.width, image.height); g.color = Color(20, 20, 20); g.font = Font("Arial", Font.PLAIN, 25)
+        g.drawString("СПРАВКА", 85, 130); g.drawString("ДОКУМЕНТ ДЕЙСТВУЕТ ДО 31.12.2030", 85, 210)
+        g.drawString("ПРОВЕРКА ТЕКСТА И ДАННЫХ", 85, 275); g.drawString("НОМЕР ДОКУМЕНТА 123456", 85, 340)
+        g.drawString("ДАТА 15.10.2025", 85, 405); g.dispose()
+        val bytes = ByteArrayOutputStream().also { ImageIO.write(image, "png", it) }.toByteArray(); image.flush()
+        val result = LocalOcr.recognizeDetailed("dim.png", bytes)
+        for (expected in listOf("СПРАВКА", "ДОКУМЕНТ", "ДЕЙСТВУЕТ", "ПРОВЕРКА", "ТЕКСТА", "НОМЕР", "ДАТА")) {
+            assertTrue(result.text.contains(expected, ignoreCase = true), "Missing $expected: ${result.text}")
+        }
+        assertTrue(result.layout!!.path("words").any { it[0].asText().contains("ДАТА", ignoreCase = true) && it[2].asDouble() > .25 })
+    }
+    @Test fun `enhances a dark low contrast page while preserving its dimensions`() {
+        val image = BufferedImage(1200, 360, BufferedImage.TYPE_INT_RGB)
+        image.createGraphics().also { g ->
+            g.color = Color(105, 105, 105); g.fillRect(0, 0, image.width, image.height)
+            g.color = Color(45, 45, 45); g.font = Font("Arial", Font.BOLD, 80); g.drawString("DOCUMENT 2030", 40, 190); g.dispose()
+        }
+        val enhanced = LocalOcr.enhanceContrast(image)
+        try {
+            assertEquals(image.width, enhanced.width); assertEquals(image.height, enhanced.height)
+            assertTrue((enhanced.getRGB(5, 5) and 255) > (image.getRGB(5, 5) and 255))
+            val bytes = ByteArrayOutputStream().also { ImageIO.write(image, "png", it) }.toByteArray()
+            assertTrue(LocalOcr.recognize("dark.png", bytes).contains("DOCUMENT", ignoreCase = true))
+        } finally { enhanced.flush(); image.flush() }
+    }
     @Test fun `extracts digital text and recognizes a scanned page in one pdf`() {
         val image = BufferedImage(1300, 260, BufferedImage.TYPE_INT_RGB)
         val graphics = image.createGraphics()

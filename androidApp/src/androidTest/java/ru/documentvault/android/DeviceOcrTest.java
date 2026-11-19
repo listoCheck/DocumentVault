@@ -22,6 +22,25 @@ import java.util.Locale;
 /** Synthetic input only: no personal documents are read or transmitted. */
 @RunWith(AndroidJUnit4.class)
 public final class DeviceOcrTest {
+    @Test public void skipsBlueStampTextButKeepsBlackDocumentText() throws Exception {
+        Bitmap bitmap = Bitmap.createBitmap(1200, 600, Bitmap.Config.ARGB_8888); Canvas canvas = new Canvas(bitmap); canvas.drawColor(Color.WHITE);
+        Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG); paint.setTypeface(Typeface.create("sans-serif", Typeface.BOLD)); paint.setTextSize(72);
+        paint.setColor(Color.BLACK); canvas.drawText("DOCUMENT 2030", 60, 180, paint); paint.setColor(Color.rgb(40, 65, 150)); canvas.drawText("FAKESTAMP", 60, 430, paint);
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream(); assertTrue(bitmap.compress(Bitmap.CompressFormat.PNG, 100, bytes)); bitmap.recycle();
+        String text = LocalOcr.recognizeImage(InstrumentationRegistry.getInstrumentation().getTargetContext(), bytes.toByteArray(), false).text.toUpperCase(Locale.ROOT);
+        assertTrue(text, text.contains("DOCUMENT")); assertTrue(text, !text.contains("FAKESTAMP"));
+    }
+    @Test public void recognizesSmallLinesOnUnevenDimPage() throws Exception {
+        Bitmap bitmap = Bitmap.createBitmap(900, 1250, Bitmap.Config.ARGB_8888); Canvas canvas = new Canvas(bitmap);
+        Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        paint.setShader(new android.graphics.LinearGradient(0, 0, 900, 1250, Color.rgb(125,125,125), Color.rgb(205,205,205), android.graphics.Shader.TileMode.CLAMP));
+        canvas.drawRect(0, 0, 900, 1250, paint); paint.setShader(null); paint.setColor(Color.rgb(20,20,20)); paint.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL)); paint.setTextSize(27);
+        canvas.drawText("СПРАВКА", 85, 130, paint); canvas.drawText("ДОКУМЕНТ ДЕЙСТВУЕТ ДО 31.12.2030", 85, 210, paint);
+        canvas.drawText("ПРОВЕРКА ТЕКСТА И ДАННЫХ", 85, 275, paint); canvas.drawText("НОМЕР ДОКУМЕНТА 123456", 85, 340, paint); canvas.drawText("ДАТА 15.10.2025", 85, 405, paint);
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream(); assertTrue(bitmap.compress(Bitmap.CompressFormat.PNG, 100, bytes)); bitmap.recycle();
+        String result = LocalOcr.recognizeImage(InstrumentationRegistry.getInstrumentation().getTargetContext(), bytes.toByteArray(), false).text.toUpperCase(Locale.ROOT);
+        for (String expected : new String[]{"СПРАВКА", "ДОКУМЕНТ", "ДЕЙСТВУЕТ", "ПРОВЕРКА", "ТЕКСТА", "НОМЕР", "ДАТА"}) assertTrue("Missing " + expected + ": " + result, result.contains(expected));
+    }
     @Test public void testDesktopEncryptionEnvelopeOnDevice() throws Exception {
         byte[] key = new byte[32]; java.util.Arrays.fill(key, (byte) 42);
         byte[] envelope = java.util.Base64.getDecoder().decode("AaVAmhJvOKSpoohjPCm2OtuyWwqZysYCdy9v2Po6Z2mSiG132SkqZ6UqssAN");
